@@ -34,8 +34,9 @@ jobs:
           fi
 
           # main push: skip release if the commit opted out or already has a tag.
+          # Use a distinct token so prose mentioning "[skip release]" doesn't trip it.
           msg=$(git log -1 --pretty=%B)
-          if grep -qE '\[skip release\]' <<<"$msg"; then
+          if grep -qE '\[skip-release\]' <<<"$msg"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if git tag --points-at HEAD | grep -q '^v'; then
