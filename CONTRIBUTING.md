@@ -59,6 +59,24 @@ the README's example table.
 Short subject (≤ 72 chars), imperative mood ("Add X", not "Added X").
 Wrap body at ~72 cols. Explain the *why*; the diff covers the *what*.
 
+## Releasing
+
+Releases are tag-driven. From `main` with a green CI:
+
+```sh
+git tag v0.1.0
+git push --tags
+```
+
+The `Release` workflow runs `go vet`, `go build`, `make test`, and
+`make e2e` against the tag, then:
+
+- creates a GitHub Release with auto-generated notes, and
+- warms `proxy.golang.org` so [pkg.go.dev](https://pkg.go.dev/github.com/cnuss/daemonize)
+  surfaces the new version without manual prodding.
+
+Tags must follow `vMAJOR.MINOR.PATCH` (Go module semver).
+
 ## License
 
 By contributing you agree your contributions are licensed under the

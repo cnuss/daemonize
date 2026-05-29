@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: true
+
+      - name: sanity check
+        run: |
+          go vet ./...
+          go build ./...
+          make test
+          make e2e
+
+      - name: create github release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: warm proxy.golang.org
+        run: |
+          tag="$GITHUB_REF_NAME"
+          mod="github.com/${GITHUB_REPOSITORY}"
+          # Triggers proxy fetch so pkg.go.dev picks up the new version.
+          curl -fsSL "https://proxy.golang.org/${mod}/@v/${tag}.info" >/dev/null
+          curl -fsSL "https://proxy.golang.org/${mod}/@v/${tag}.mod"  >/dev/null
+          curl -fsSL "https://sum.golang.org/lookup/${mod}@${tag}"    >/dev/null
