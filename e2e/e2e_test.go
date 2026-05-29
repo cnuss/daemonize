@@ -148,7 +148,7 @@ func TestSubcommand(t *testing.T) {
 func TestStartError(t *testing.T) {
 	r := newRunner(t, "start-error")
 	out := r.run(t, "start")
-	wants(t, out, "exited during startup")  // daemon detected the failed child
+	wants(t, out, "exited during startup")      // daemon detected the failed child
 	wants(t, r.run(t, "status"), "not running") // nothing left behind
 }
 
