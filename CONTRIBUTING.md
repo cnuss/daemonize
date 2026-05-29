@@ -61,19 +61,26 @@ Wrap body at ~72 cols. Explain the *why*; the diff covers the *what*.
 
 ## Releasing
 
-Releases are tag-driven. From `main` with a green CI:
+Patch releases are automatic. Every push to `main` runs the `Release`
+workflow, which bumps the patch component of the latest `v*` tag,
+re-runs `go vet`, `go build`, `make test`, and `make e2e` against that
+ref, then:
 
-```sh
-git tag v0.1.0
-git push --tags
-```
-
-The `Release` workflow runs `go vet`, `go build`, `make test`, and
-`make e2e` against the tag, then:
-
+- pushes the new tag,
 - creates a GitHub Release with auto-generated notes, and
 - warms `proxy.golang.org` so [pkg.go.dev](https://pkg.go.dev/github.com/cnuss/daemonize)
   surfaces the new version without manual prodding.
+
+To opt a commit out of the auto-bump, include `[skip release]` in its
+message.
+
+For a minor or major bump, tag locally and push the tag — the workflow
+treats a manual tag as the version of record and skips the bump:
+
+```sh
+git tag v0.2.0
+git push --tags
+```
 
 Tags must follow `vMAJOR.MINOR.PATCH` (Go module semver).
 
