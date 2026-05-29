@@ -71,8 +71,9 @@ ref, then:
 - warms `proxy.golang.org` so [pkg.go.dev](https://pkg.go.dev/github.com/cnuss/daemonize)
   surfaces the new version without manual prodding.
 
-To opt a commit out of the auto-bump, include `[skip-release]` (with
-the hyphen) anywhere in its message.
+To opt a commit out of the auto-bump, put `[skip-release]` on its own
+line in the commit body. (It must be the only thing on its line, so
+prose mentioning the token inline doesn't accidentally suppress.)
 
 For a minor or major bump, tag locally and push the tag — the workflow
 treats a manual tag as the version of record and skips the bump:

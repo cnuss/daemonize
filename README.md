@@ -154,6 +154,11 @@ make e2e    # end-to-end harness: builds + drives every example binary
 `make e2e` runs `go test -count=1 -v ./e2e`, with an isolated cache
 (`HOME`/`XDG_CACHE_HOME`) per test so pid/log files never collide.
 
+## Contributing
+
+PRs welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the local dev
+loop, release process, and what makes a good example.
+
 ## License
 
 [MIT](./LICENSE)
