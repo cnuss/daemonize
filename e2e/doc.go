@@ -1,0 +1,3 @@
+// Package e2e builds each example binary and drives its lifecycle end-to-end,
+// asserting the behavior that example demonstrates. Run with: go test ./examples/...
+package e2e

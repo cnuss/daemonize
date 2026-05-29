@@ -1,0 +1,23 @@
+# Keep the go.mod `require` lines at their relaxed floor: dependabot may PR
+# major (semver) bumps for review, but minor/patch bumps are ignored so the
+# library's minimum-version constraint doesn't drift up automatically (Go
+# modules treat `require` as the minimum acceptable version).
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: github.com/spf13/cobra
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
+      - dependency-name: github.com/spf13/pflag
+      - dependency-name: github.com/inconshreveable/mousetrap
+
+  # GitHub Actions workflows (if/when added).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
