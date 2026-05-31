@@ -25,13 +25,15 @@ go get github.com/cnuss/daemonize
 
 ```diff
  import (
- 	...
+ 	"fmt"
+ 	"os"
++	"syscall"
+
 +	"github.com/cnuss/daemonize"
  	"github.com/spf13/cobra"
  )
 
  func main() {
- 	...
 +	ready := make(chan struct{})
 
  	cmd := &cobra.Command{
@@ -43,9 +45,13 @@ go get github.com/cnuss/daemonize
  			...
  		},
  	}
- 	...
+ 	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
+
 -	if err := cmd.Execute(); err != nil {
-+	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
++	if err := daemonize.FromCobra(cmd).
++		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
++		DetachOn(ready).
++		Execute(); err != nil {
  		fmt.Fprintln(os.Stderr, "error:", err)
  		os.Exit(1)
  	}
@@ -62,19 +68,13 @@ A basic cobra command:
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	var message string
 	cmd := &cobra.Command{
 		Use:   "hello",
@@ -87,7 +87,6 @@ func main() {
 		},
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
-	cmd.SetContext(ctx)
 
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -209,6 +208,8 @@ type Daemon[T any] interface {
     WithReload(sig syscall.Signal) Daemon[T] // enables the "reload" subcommand
     WithName(name string) Daemon[T]          // override state-file base name
     WithGroup(name *string) Daemon[T]        // help-group title (nil = ungroup)
+    WithContext(parent context.Context) Daemon[T]    // parent ctx for the wrapped cmd; nil = opt out
+    WithShutdownSignal(sigs ...os.Signal) Daemon[T]   // signal.NotifyContext around the parent ctx
 
     // Runtime accessors / actions (usable without building the cobra tree)
     Stop() error
