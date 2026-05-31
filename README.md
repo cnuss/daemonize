@@ -3,6 +3,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cnuss/daemonize.svg)](https://pkg.go.dev/github.com/cnuss/daemonize)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cnuss/daemonize)](https://goreportcard.com/report/github.com/cnuss/daemonize)
 [![CI](https://github.com/cnuss/daemonize/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cnuss/daemonize/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/cnuss/daemonize/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/cnuss/daemonize/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cnuss/daemonize/badge)](https://scorecard.dev/viewer/?uri=github.com/cnuss/daemonize)
 [![Latest release](https://img.shields.io/github/v/release/cnuss/daemonize?sort=semver)](https://github.com/cnuss/daemonize/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
