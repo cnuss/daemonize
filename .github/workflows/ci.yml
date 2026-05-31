@@ -130,19 +130,19 @@ jobs:
 
           # Pull the auto-generated source archives that GitHub publishes
           # alongside every tag, then sign them with cosign in keyless mode
-          # (OIDC -> Fulcio cert -> Rekor transparency log).
+          # (OIDC -> Fulcio cert -> Rekor transparency log). The signature,
+          # cert, and Rekor entry are bundled in a single .sigstore file.
           for ext in tar.gz zip; do
             curl -fsSL "https://github.com/${repo}/archive/refs/tags/${tag}.${ext}" \
               -o "dist/${tag}.${ext}"
             cosign sign-blob --yes \
-              --output-signature "dist/${tag}.${ext}.sig" \
-              --output-certificate "dist/${tag}.${ext}.pem" \
+              --bundle "dist/${tag}.${ext}.sigstore" \
               "dist/${tag}.${ext}"
           done
 
           gh release upload "${tag}" \
-            "dist/${tag}.tar.gz.sig" "dist/${tag}.tar.gz.pem" \
-            "dist/${tag}.zip.sig"    "dist/${tag}.zip.pem"
+            "dist/${tag}.tar.gz.sigstore" \
+            "dist/${tag}.zip.sigstore"
 
       - name: warm proxy.golang.org
         if: steps.tag.outputs.skip != 'true'

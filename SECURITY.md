@@ -37,25 +37,25 @@ Please do **not** open a public issue for a suspected vulnerability.
 
 Source archives for every tagged release are signed with
 [cosign](https://github.com/sigstore/cosign) in keyless mode (Sigstore
-Fulcio cert, Rekor transparency log). Each release ships four extra
-assets alongside the source archives:
+Fulcio cert, Rekor transparency log). Each release ships a self-contained
+signature bundle for each source archive:
 
-- `vX.Y.Z.tar.gz.sig` / `vX.Y.Z.tar.gz.pem`
-- `vX.Y.Z.zip.sig` / `vX.Y.Z.zip.pem`
+- `vX.Y.Z.tar.gz.sigstore`
+- `vX.Y.Z.zip.sigstore`
 
-To verify:
+To verify (cosign v2+):
 
 ```sh
-TAG=v0.1.7
+TAG=v0.1.13
 REPO=cnuss/daemonize
 
-curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"           -o "${TAG}.tar.gz"
-curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${TAG}.tar.gz.sig" -o "${TAG}.tar.gz.sig"
-curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${TAG}.tar.gz.pem" -o "${TAG}.tar.gz.pem"
+curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz" \
+  -o "${TAG}.tar.gz"
+curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${TAG}.tar.gz.sigstore" \
+  -o "${TAG}.tar.gz.sigstore"
 
 cosign verify-blob \
-  --certificate           "${TAG}.tar.gz.pem" \
-  --signature             "${TAG}.tar.gz.sig" \
+  --bundle "${TAG}.tar.gz.sigstore" \
   --certificate-identity-regexp '^https://github.com/cnuss/daemonize/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "${TAG}.tar.gz"
