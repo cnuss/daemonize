@@ -25,6 +25,10 @@ const (
 	// stopPollEach is how often Stop checks whether the child has exited.
 	stopPollEach = 100 * time.Millisecond
 
+	// startInterruptGrace is how long start waits for the child to exit
+	// gracefully after Ctrl+C during startup, before escalating to SIGKILL.
+	startInterruptGrace = 5 * time.Second
+
 	// defaultGroupID is the cobra group ID for the lifecycle subcommands;
 	// defaultGroupName is its title (a ":" is appended on render).
 	defaultGroupID   = "daemonize"
@@ -444,9 +448,19 @@ func (d *DaemonImpl[T]) start(extra []string) error {
 
 	switch d.streamUntilReady(sigCh, pid) {
 	case startInterrupted:
-		fmt.Printf("\nstartup interrupted; killing %s (pid %d)\n", serveName, pid)
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		_ = cmd.Wait()
+		fmt.Printf("\nstartup interrupted; stopping %s (pid %d)...\n", serveName, pid)
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+
+		// Give the child a brief window to handle SIGTERM, then SIGKILL.
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(startInterruptGrace):
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			<-done
+		}
+
 		os.Remove(d.pidFile)
 		return fmt.Errorf("startup cancelled")
 	case startFailed:

@@ -178,8 +178,9 @@ subcommand that signals the running process.
   command — it never sees a signal.
 - **Streaming**: `start` tails the child's log so the user sees real startup
   output until ready; `stop` tails it during graceful shutdown.
-- **Ctrl+C handling**: `start` cancels (kills the child) if interrupted
-  mid-startup; `stop` escalates to `SIGKILL` on interrupt.
+- **Ctrl+C handling**: `start` sends `SIGTERM` to the child if interrupted
+  mid-startup (escalating to `SIGKILL` after a short grace period); `stop`
+  escalates to `SIGKILL` on a second interrupt.
 - **Per-daemon state files**: pid/log live under
   `<UserCacheDir>/.<command-name>/<base>.{pid,log}`. Override with `WithName`.
 - **Help grouping**: lifecycle subcommands are grouped (`Daemon Commands:` by
