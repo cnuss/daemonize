@@ -25,9 +25,10 @@ const (
 	// stopPollEach is how often Stop checks whether the child has exited.
 	stopPollEach = 100 * time.Millisecond
 
-	// startInterruptGrace is how long start waits for the child to exit
-	// gracefully after Ctrl+C during startup, before escalating to SIGKILL.
-	startInterruptGrace = 5 * time.Second
+	// defaultStartInterruptGrace is the implicit grace period the startup-
+	// interrupt path uses when WithGracePeriod hasn't been called. (Stop has
+	// no implicit grace and waits indefinitely by default.)
+	defaultStartInterruptGrace = 5 * time.Second
 
 	// defaultGroupID is the cobra group ID for the lifecycle subcommands;
 	// defaultGroupName is its title (a ":" is appended on render).
@@ -91,11 +92,16 @@ type Daemon[T any] interface {
 	// pass nil to ungroup (list them under Additional Commands). Unset, they are
 	// grouped under "Daemon Commands:".
 	WithGroup(name *string) Daemon[T]
-	// WithStopTimeout bounds how long Stop waits for the child to exit gracefully
-	// before escalating to SIGKILL. A zero (or unset) timeout disables the
-	// deadline — Stop waits indefinitely until the child exits or the user
-	// interrupts (Ctrl+C), which always force-kills.
-	WithStopTimeout(timeout time.Duration) Daemon[T]
+	// WithGracePeriod bounds how long the daemon waits between SIGTERM and
+	// SIGKILL when the child needs to be stopped. It applies to two paths:
+	//   - Stop: the time between SIGTERM and the SIGKILL fallback. Zero means
+	//     wait indefinitely for the child to exit (the default); Ctrl+C
+	//     during Stop always force-kills regardless.
+	//   - start, when interrupted by Ctrl+C during the startup stream: the
+	//     time between SIGTERM and the SIGKILL fallback. Zero falls back to a
+	//     built-in default (a few seconds) so the interrupt actually
+	//     terminates.
+	WithGracePeriod(grace time.Duration) Daemon[T]
 
 	// Stop signals the running process (SIGTERM, escalating to SIGKILL on
 	// timeout) and waits for it to exit. Usable without building the cobra tree.
@@ -129,7 +135,7 @@ type DaemonImpl[T any] struct {
 	name        *string            // nil = derive from command path
 	group       *string            // group title; nil (with groupSet) = ungrouped
 	groupSet    bool               // true once WithGroup was called
-	stopTimeout time.Duration      // 0 = wait forever for graceful exit
+	gracePeriod time.Duration      // SIGTERM→SIGKILL gap (0 = Stop waits forever; start uses defaultStartInterruptGrace)
 
 	// State-file paths and the base name they derive from, resolved in buildCobra.
 	pidFile string
@@ -195,8 +201,8 @@ func (d *DaemonImpl[T]) WithGroup(name *string) Daemon[T] {
 	return d
 }
 
-func (d *DaemonImpl[T]) WithStopTimeout(timeout time.Duration) Daemon[T] {
-	d.stopTimeout = timeout
+func (d *DaemonImpl[T]) WithGracePeriod(grace time.Duration) Daemon[T] {
+	d.gracePeriod = grace
 	return d
 }
 
@@ -451,12 +457,19 @@ func (d *DaemonImpl[T]) start(extra []string) error {
 		fmt.Printf("\nstartup interrupted; stopping %s (pid %d)...\n", serveName, pid)
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 
-		// Give the child a brief window to handle SIGTERM, then SIGKILL.
+		// Give the child a window to handle SIGTERM, then SIGKILL. Use the
+		// caller-configured grace period; fall back to a built-in default so
+		// the interrupt always terminates within a few seconds even when
+		// WithGracePeriod is unset.
+		grace := d.gracePeriod
+		if grace <= 0 {
+			grace = defaultStartInterruptGrace
+		}
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(startInterruptGrace):
+		case <-time.After(grace):
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			<-done
 		}
@@ -545,11 +558,11 @@ func (d *DaemonImpl[T]) Stop() error {
 		return err
 	}
 
-	// A zero stopTimeout means wait forever for the child to exit gracefully;
+	// A zero grace period means wait forever for the child to exit gracefully;
 	// Ctrl+C (or SIGTERM to this process) always escalates to SIGKILL.
 	var deadline <-chan time.Time
-	if d.stopTimeout > 0 {
-		deadline = time.After(d.stopTimeout)
+	if d.gracePeriod > 0 {
+		deadline = time.After(d.gracePeriod)
 	}
 	for {
 		tail.copy()
@@ -571,7 +584,7 @@ func (d *DaemonImpl[T]) Stop() error {
 				return fmt.Errorf("force kill (pid %d): %w", pid, err)
 			}
 			os.Remove(d.pidFile)
-			fmt.Printf("killed (pid %d) after %s timeout\n", pid, d.stopTimeout)
+			fmt.Printf("killed (pid %d) after %s grace period\n", pid, d.gracePeriod)
 			return nil
 		case <-time.After(stopPollEach):
 		}

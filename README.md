@@ -208,7 +208,7 @@ type Daemon[T any] interface {
     WithReload(sig syscall.Signal) Daemon[T] // enables the "reload" subcommand
     WithName(name string) Daemon[T]          // override state-file base name
     WithGroup(name *string) Daemon[T]        // help-group title (nil = ungroup)
-    WithStopTimeout(d time.Duration) Daemon[T] // SIGKILL fallback (0 = wait forever)
+    WithGracePeriod(grace time.Duration) Daemon[T] // SIGTERM→SIGKILL window (0 = Stop waits forever)
 
     // Runtime accessors / actions (usable without building the cobra tree)
     Stop() error
@@ -241,7 +241,7 @@ Self-contained programs in [`./examples`](./examples):
 | `slow-shutdown`  | Streaming a multi-second graceful shutdown.                  |
 | `start-error`    | Daemon detects a child that fails before signaling ready.    |
 | `shutdown-error` | Daemon streams a failure during shutdown; still stops.       |
-| `shutdown-timeout` | `WithStopTimeout(...)` escalates to SIGKILL on slow drain. |
+| `shutdown-timeout` | `WithGracePeriod(...)` escalates to SIGKILL on slow drain. |
 | `pid-cleanup`    | Worker exits early without signaling ready; pid file gone.   |
 | `subcommand`     | Daemon mounted under a larger cobra tree (e.g. `app run`).   |
 

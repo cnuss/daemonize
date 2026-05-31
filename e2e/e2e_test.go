@@ -165,11 +165,11 @@ func TestShutdownError(t *testing.T) {
 func TestShutdownTimeout(t *testing.T) {
 	r := newRunner(t, "shutdown-timeout")
 
-	// Worker stalls inside its shutdown handler past the 200ms WithStopTimeout
+	// Worker stalls inside its shutdown handler past the 200ms grace period
 	// configured in the example, so stop must escalate to SIGKILL.
 	wants(t, r.run(t, "start"), "ready", "started")
 	out := r.run(t, "stop")
-	wants(t, out, "draining", "killed", "timeout")
+	wants(t, out, "draining", "killed", "grace period")
 	wants(t, r.run(t, "status"), "not running")
 }
 
