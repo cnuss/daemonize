@@ -1,11 +1,14 @@
 package e2e
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // runner builds an example binary once and runs its subcommands against an
@@ -42,6 +45,32 @@ func (r *runner) execRaw(args ...string) string {
 	c.Env = append(os.Environ(), "HOME="+r.home, "XDG_CACHE_HOME="+r.home)
 	out, _ := c.CombinedOutput()
 	return string(out)
+}
+
+// runInterrupt starts the example asynchronously, sends SIGINT at each of the
+// given offsets (measured from launch), then waits for it to exit and returns
+// the combined output. Used to exercise Ctrl+C escalation paths.
+func (r *runner) runInterrupt(t *testing.T, args []string, sendAt ...time.Duration) string {
+	t.Helper()
+	c := exec.Command(r.bin, args...)
+	c.Env = append(os.Environ(), "HOME="+r.home, "XDG_CACHE_HOME="+r.home)
+	var buf bytes.Buffer
+	c.Stdout = &buf
+	c.Stderr = &buf
+	if err := c.Start(); err != nil {
+		t.Fatalf("start %s %v: %v", r.name, args, err)
+	}
+	started := time.Now()
+	for _, when := range sendAt {
+		if d := time.Until(started.Add(when)); d > 0 {
+			time.Sleep(d)
+		}
+		_ = c.Process.Signal(syscall.SIGINT)
+	}
+	_ = c.Wait()
+	out := buf.String()
+	t.Logf("$ %s %s (interrupts: %v)\n%s", r.name, strings.Join(args, " "), sendAt, out)
+	return out
 }
 
 func wants(t *testing.T, out string, subs ...string) {
@@ -162,17 +191,6 @@ func TestShutdownError(t *testing.T) {
 	wants(t, r.run(t, "status"), "not running")
 }
 
-func TestShutdownTimeout(t *testing.T) {
-	r := newRunner(t, "shutdown-timeout")
-
-	// Worker stalls inside its shutdown handler past the 200ms grace period
-	// configured in the example, so stop must escalate to SIGKILL.
-	wants(t, r.run(t, "start"), "ready", "started")
-	out := r.run(t, "stop")
-	wants(t, out, "draining", "killed", "grace period")
-	wants(t, r.run(t, "status"), "not running")
-}
-
 func TestPidCleanup(t *testing.T) {
 	r := newRunner(t, "pid-cleanup")
 
@@ -200,6 +218,43 @@ func TestPidCleanup(t *testing.T) {
 	if !strings.Contains(string(contents), "hello world") {
 		t.Errorf("log file %s missing \"hello world\":\n%s", logPath, contents)
 	}
+}
+
+func TestStartInterruptGraceful(t *testing.T) {
+	r := newRunner(t, "slow-start")
+
+	// Single Ctrl+C while start is still streaming startup output sends SIGTERM
+	// to the child; the slow-start worker's signal handler picks that up,
+	// prints "stopping", and exits cleanly. No SIGKILL escalation needed.
+	out := r.runInterrupt(t, []string{"start", "--step", "200ms"}, 300*time.Millisecond)
+	wants(t, out, "startup interrupted", "startup cancelled")
+	rejects(t, out, "forcing kill")
+	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestStartInterruptEscalates(t *testing.T) {
+	r := newRunner(t, "stubborn")
+
+	// stubborn ignores SIGTERM; the first Ctrl+C during start triggers SIGTERM
+	// (which the worker drops), and a second Ctrl+C escalates to SIGKILL.
+	// stubborn delays close(ready) by ~2s to keep the parent in
+	// streamUntilReady long enough for both interrupts to land mid-stream.
+	out := r.runInterrupt(t, []string{"start"},
+		400*time.Millisecond, 900*time.Millisecond)
+	wants(t, out, "startup interrupted", "forcing kill", "startup cancelled")
+	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestStopInterruptEscalates(t *testing.T) {
+	r := newRunner(t, "stubborn")
+
+	wants(t, r.run(t, "start"), "ready", "started")
+
+	// stop sends SIGTERM and waits forever; stubborn ignores it. A single
+	// Ctrl+C during the wait escalates to SIGKILL and reports the kill.
+	out := r.runInterrupt(t, []string{"stop"}, 300*time.Millisecond)
+	wants(t, out, "shutting down", "killed", "on interrupt")
+	wants(t, r.run(t, "status"), "not running")
 }
 
 // between returns the substring of s that sits between the first occurrence

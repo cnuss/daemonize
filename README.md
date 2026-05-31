@@ -178,9 +178,10 @@ subcommand that signals the running process.
   command — it never sees a signal.
 - **Streaming**: `start` tails the child's log so the user sees real startup
   output until ready; `stop` tails it during graceful shutdown.
-- **Ctrl+C handling**: `start` sends `SIGTERM` to the child if interrupted
-  mid-startup (escalating to `SIGKILL` after a short grace period); `stop`
-  escalates to `SIGKILL` on a second interrupt.
+- **Ctrl+C handling**: `start` sends `SIGTERM` to the child on the first
+  Ctrl+C and waits for it to exit; a second Ctrl+C escalates to `SIGKILL`.
+  `stop` follows the same pattern: first interrupt is the implicit
+  `SIGTERM`, second escalates to `SIGKILL`.
 - **Per-daemon state files**: pid/log live under
   `<UserCacheDir>/.<command-name>/<base>.{pid,log}`. Override with `WithName`.
 - **Help grouping**: lifecycle subcommands are grouped (`Daemon Commands:` by
@@ -208,7 +209,6 @@ type Daemon[T any] interface {
     WithReload(sig syscall.Signal) Daemon[T] // enables the "reload" subcommand
     WithName(name string) Daemon[T]          // override state-file base name
     WithGroup(name *string) Daemon[T]        // help-group title (nil = ungroup)
-    WithGracePeriod(grace time.Duration) Daemon[T] // SIGTERM→SIGKILL window (0 = Stop waits forever)
 
     // Runtime accessors / actions (usable without building the cobra tree)
     Stop() error
@@ -241,8 +241,8 @@ Self-contained programs in [`./examples`](./examples):
 | `slow-shutdown`  | Streaming a multi-second graceful shutdown.                  |
 | `start-error`    | Daemon detects a child that fails before signaling ready.    |
 | `shutdown-error` | Daemon streams a failure during shutdown; still stops.       |
-| `shutdown-timeout` | `WithGracePeriod(...)` escalates to SIGKILL on slow drain. |
 | `pid-cleanup`    | Worker exits early without signaling ready; pid file gone.   |
+| `stubborn`       | Worker ignores SIGTERM; demonstrates Ctrl+C → SIGKILL.       |
 | `subcommand`     | Daemon mounted under a larger cobra tree (e.g. `app run`).   |
 
 Run one locally:
