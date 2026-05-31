@@ -33,6 +33,36 @@ Please do **not** open a public issue for a suspected vulnerability.
 - A coordinated disclosure once a fix or workaround is available; we will
   credit you in the advisory unless you ask otherwise.
 
+## Verifying releases
+
+Source archives for every tagged release are signed with
+[cosign](https://github.com/sigstore/cosign) in keyless mode (Sigstore
+Fulcio cert, Rekor transparency log). Each release ships four extra
+assets alongside the source archives:
+
+- `vX.Y.Z.tar.gz.sig` / `vX.Y.Z.tar.gz.pem`
+- `vX.Y.Z.zip.sig` / `vX.Y.Z.zip.pem`
+
+To verify:
+
+```sh
+TAG=v0.1.7
+REPO=cnuss/daemonize
+
+curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"           -o "${TAG}.tar.gz"
+curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${TAG}.tar.gz.sig" -o "${TAG}.tar.gz.sig"
+curl -fsSL "https://github.com/${REPO}/releases/download/${TAG}/${TAG}.tar.gz.pem" -o "${TAG}.tar.gz.pem"
+
+cosign verify-blob \
+  --certificate           "${TAG}.tar.gz.pem" \
+  --signature             "${TAG}.tar.gz.sig" \
+  --certificate-identity-regexp '^https://github.com/cnuss/daemonize/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${TAG}.tar.gz"
+```
+
+`Verified OK` means the archive matches what the release workflow signed.
+
 ## Scope
 
 In-scope: anything in this repository's library code (`daemonize.go`,
