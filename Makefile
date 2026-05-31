@@ -11,7 +11,7 @@ e2e:
 	go test -count=1 -v ./e2e
 
 # Run an example by name, forwarding any trailing words as args:
-#   make run minimal start
+#   make run hello start
 #   make run with-args start --port 9000
 run:
 	cd examples/$(word 2,$(MAKECMDGOALS)) && go run . $(wordlist 3,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))

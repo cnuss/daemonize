@@ -17,7 +17,7 @@ make e2e    # builds and drives every example binary
 Run a specific example locally:
 
 ```sh
-make run minimal start
+make run hello start
 make run with-args start --port 9000
 ```
 

@@ -83,15 +83,17 @@ func TestLifecycle(t *testing.T) {
 }
 
 func TestStopIdempotent(t *testing.T) {
-	r := newRunner(t, "minimal")
+	r := newRunner(t, "hello")
 	// stop when never started: no error, exit 0 path prints "not running".
 	wants(t, r.run(t, "stop"), "not running")
 }
 
-func TestMinimalHasNoReload(t *testing.T) {
-	r := newRunner(t, "minimal")
-	wants(t, r.run(t, "start"), "started")
-	wants(t, r.run(t, "reload"), "unknown command") // minimal didn't call WithReload
+func TestHelloHasNoReload(t *testing.T) {
+	r := newRunner(t, "hello")
+	// hello didn't call WithReload, so the reload subcommand should not be
+	// attached. (Invoking `reload` would now be a positional under the
+	// default ArbitraryArgs validator, so we check the help output instead.)
+	rejects(t, r.run(t, "--help"), "reload")
 }
 
 func TestNamedStateFile(t *testing.T) {
@@ -158,4 +160,59 @@ func TestShutdownError(t *testing.T) {
 	out := r.run(t, "stop")
 	wants(t, out, "shutdown error", "stopped") // failure streamed, but still stops
 	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestShutdownTimeout(t *testing.T) {
+	r := newRunner(t, "shutdown-timeout")
+
+	// Worker stalls inside its shutdown handler past the 200ms WithStopTimeout
+	// configured in the example, so stop must escalate to SIGKILL.
+	wants(t, r.run(t, "start"), "ready", "started")
+	out := r.run(t, "stop")
+	wants(t, out, "draining", "killed", "timeout")
+	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestPidCleanup(t *testing.T) {
+	r := newRunner(t, "pid-cleanup")
+
+	// The worker never closes ready; it sleeps 5s, prints "hello world",
+	// and returns. The daemon treats that as "exited during startup", but
+	// the pid file should still be removed and the log file should have
+	// captured the worker's output.
+	out := r.run(t, "start")
+	wants(t, out, "hello world", "exited during startup")
+
+	logPath := between(out, "exited during startup (see ", ")")
+	if logPath == "" {
+		t.Fatalf("could not find log path in output:\n%s", out)
+	}
+	pidPath := strings.TrimSuffix(logPath, ".log") + ".pid"
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("pid file %s should be cleaned up after exit, stat err = %v", pidPath, err)
+	}
+
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log %s: %v", logPath, err)
+	}
+	if !strings.Contains(string(contents), "hello world") {
+		t.Errorf("log file %s missing \"hello world\":\n%s", logPath, contents)
+	}
+}
+
+// between returns the substring of s that sits between the first occurrence
+// of prefix and the next occurrence of suffix after it, or "" if either is
+// missing.
+func between(s, prefix, suffix string) string {
+	_, rest, ok := strings.Cut(s, prefix)
+	if !ok {
+		return ""
+	}
+	mid, _, ok := strings.Cut(rest, suffix)
+	if !ok {
+		return ""
+	}
+	return mid
 }

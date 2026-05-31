@@ -1,7 +1,7 @@
 // Command slow-shutdown demonstrates a wrapped command with a slow, graceful
 // shutdown. Startup is instant; on SIGTERM the command runs several drain steps
 // before exiting, and the daemon streams them to the terminal while "stop"
-// waits (escalating to SIGKILL only if the stop timeout is exceeded).
+// waits (forever, by default; pass WithStopTimeout to bound it).
 //
 // The --step delay is set at start (forwarded to the worker); stop just signals
 // it. Try: go run . start --step 500ms, then in another shell: go run . stop

@@ -9,6 +9,156 @@ foreground; the daemon manages backgrounding, a pid file, log streaming during
 startup and shutdown, and signal-based readiness, all without mutating the
 command.
 
+## Quick Start
+
+Captured from [`examples/hello`](./examples/hello).
+
+**Before** — a bare cobra worker:
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+)
+
+func main() {
+	var message string
+	cmd := &cobra.Command{
+		Use:   "hello",
+		Short: "Say hello",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("hello %s\n", message)
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+			<-stop
+			fmt.Println("stopping")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+```
+
+```
+$ ./hello --help
+Say hello
+
+Usage:
+  hello [flags]
+
+Flags:
+  -h, --help             help for hello
+  -m, --message string   who to greet (default "world")
+```
+
+**After** — add the `daemonize` import, a `ready` channel, and swap
+`cmd.Execute()` for `daemonize.FromCobra(cmd).DetachOn(ready).Execute()`:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/cnuss/daemonize"
+	"github.com/spf13/cobra"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	ready := make(chan struct{})
+
+	var message string
+	cmd := &cobra.Command{
+		Use:   "hello",
+		Short: "Say hello",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("hello %s\n", message)
+			close(ready) // tell the daemon: I'm up
+			<-cmd.Context().Done()
+			fmt.Println("stopping")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
+	cmd.SetContext(ctx)
+
+	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+```
+
+```
+$ ./hello --help
+Say hello
+
+Usage:
+  hello [flags]
+  hello [command]
+
+Daemon Commands:
+  start       Start `hello` in the background
+  status      Report whether `hello` is running
+  stop        Stop the running `hello`
+
+Additional Commands:
+  completion  Generate the autocompletion script for the specified shell
+  help        Help about any command
+
+Flags:
+  -h, --help             help for hello
+  -m, --message string   who to greet (default "world")
+
+Use "hello [command] --help" for more information about a command.
+```
+
+The wrapped flags (`-m`) carry through to `start`, so `hello start -m there`
+forwards exactly what the foreground worker would have seen:
+
+```
+$ ./hello help start
+Start `hello` in the background
+
+Usage:
+  hello start [flags]
+
+Flags:
+  -h, --help             help for start
+  -m, --message string   who to greet (default "world")
+```
+
+The command's own `Short` and flags stay as written; daemonize attaches the
+lifecycle subcommands and wraps `RunE` to own the pid file. Then:
+
+```
+./hello start         # daemonize (streams startup output, detaches when ready)
+./hello status        # running (pid N)
+./hello stop          # SIGTERM (Ctrl+C escalates to SIGKILL)
+./hello               # run the wrapped command in the foreground
+./hello -m there      # forward -m to the foreground run
+./hello start -m there  # forward -m to the daemonized run
+```
+
+Add `.WithReload(syscall.SIGHUP)` before `DetachOn` to register a `reload`
+subcommand that signals the running process.
+
 ## Features
 
 - **In-place enrichment**: `FromCobra(cmd).DetachOn(ready)` returns the same
@@ -42,112 +192,6 @@ go get github.com/cnuss/daemonize
 
 Module floor is `go 1.21` / `cobra v1.6.0`.
 
-## Quick start
-
-```go
-package main
-
-import (
-	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
-
-	"github.com/cnuss/daemonize"
-	"github.com/spf13/cobra"
-)
-
-func main() {
-	ready := make(chan struct{})
-
-	serve := &cobra.Command{
-		Use:   "serve",
-		Short: "Run the server in the foreground",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// ... slow startup work ...
-			close(ready) // signal the daemon: I'm up
-
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			<-stop
-			return nil
-		},
-	}
-
-	cmd := daemonize.FromCobra(serve).
-		WithReload(syscall.SIGHUP).
-		DetachOn(ready)
-
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-}
-```
-
-Then:
-
-```
-./app start       # daemonize (streams startup output, detaches when ready)
-./app status      # running (pid N)
-./app reload      # SIGHUP to the running process
-./app stop        # SIGTERM, escalating to SIGKILL on timeout
-./app             # run the wrapped command in the foreground
-```
-
-If your foreground command takes positional args, set
-`Args: cobra.ArbitraryArgs` (or a stricter validator). Without it, cobra
-treats the first unknown positional as a missing subcommand once
-`start`/`stop`/`status` are attached.
-
-## What `--help` looks like
-
-**Before** — bare cobra command:
-
-```
-$ serve --help
-Run the worker in the foreground (Ctrl-C to stop)
-
-Usage:
-  serve [flags]
-
-Flags:
-  -h, --help             help for serve
-  -m, --message string   message printed when ready (default "hello")
-```
-
-**After** — same command after `daemonize.FromCobra(...).WithReload(SIGHUP).DetachOn(ready)`:
-
-```
-$ serve --help
-Run the worker in the foreground (Ctrl-C to stop)
-
-Usage:
-  serve [flags]
-  serve [command]
-
-Daemon Commands:
-  reload      Signal the running `serve` to reload (hangup)
-  start       Start `serve` in the background
-  status      Report whether `serve` is running
-  stop        Stop the running `serve`
-
-Additional Commands:
-  completion  Generate the autocompletion script for the specified shell
-  help        Help about any command
-
-Flags:
-  -h, --help             help for serve
-  -m, --message string   message printed when ready (default "hello")
-
-Use "serve [command] --help" for more information about a command.
-```
-
-The command's own `Short` and flags stay as the user wrote them; daemonize
-only adds the lifecycle subcommands and wraps `RunE` to own the pid file.
-`serve -m hi` runs the worker in the foreground; `serve start -m hi`
-daemonizes it with the same flag forwarded.
-
 ## API at a glance
 
 ```go
@@ -158,6 +202,7 @@ type Daemon[T any] interface {
     WithReload(sig syscall.Signal) Daemon[T] // enables the "reload" subcommand
     WithName(name string) Daemon[T]          // override state-file base name
     WithGroup(name *string) Daemon[T]        // help-group title (nil = ungroup)
+    WithStopTimeout(d time.Duration) Daemon[T] // SIGKILL fallback (0 = wait forever)
 
     // Runtime accessors / actions (usable without building the cobra tree)
     Stop() error
@@ -178,26 +223,28 @@ func FromCobra(command *cobra.Command) Daemon[*cobra.Command]      // shorthand
 
 Self-contained programs in [`./examples`](./examples):
 
-| Example                          | Demonstrates                                                |
-| -------------------------------- | ----------------------------------------------------------- |
-| `minimal`                        | Smallest wiring (`FromCobra` + `DetachOn`).                 |
-| `reload`                         | `WithReload(SIGHUP)` and a worker that handles it.          |
-| `named`                          | `WithName("widget")` for custom pid/log file names.         |
-| `grouped`                        | `WithGroup(&"Lifecycle")` for a custom help-group title.    |
-| `ungrouped`                      | `WithGroup(nil)` to put lifecycle under Additional Commands.|
-| `with-args`                      | Flag + positional forwarding through `start` to the child.  |
-| `slow-start`                     | Streaming a multi-second startup until ready.               |
-| `slow-shutdown`                  | Streaming a multi-second graceful shutdown.                 |
-| `start-error`                    | Daemon detects a child that fails before signaling ready.   |
-| `shutdown-error`                 | Daemon streams a failure during shutdown; still stops.      |
-| `subcommand`                     | Daemon mounted under a larger cobra tree (e.g. `app run`).  |
+| Example          | Demonstrates                                                 |
+| ---------------- | ------------------------------------------------------------ |
+| `hello`          | Smallest wiring (`FromCobra` + `DetachOn`).                  |
+| `reload`         | `WithReload(SIGHUP)` and a worker that handles it.           |
+| `named`          | `WithName("widget")` for custom pid/log file names.          |
+| `grouped`        | `WithGroup(&"Lifecycle")` for a custom help-group title.     |
+| `ungrouped`      | `WithGroup(nil)` to put lifecycle under Additional Commands. |
+| `with-args`      | Flag + positional forwarding through `start` to the child.   |
+| `slow-start`     | Streaming a multi-second startup until ready.                |
+| `slow-shutdown`  | Streaming a multi-second graceful shutdown.                  |
+| `start-error`    | Daemon detects a child that fails before signaling ready.    |
+| `shutdown-error` | Daemon streams a failure during shutdown; still stops.       |
+| `shutdown-timeout` | `WithStopTimeout(...)` escalates to SIGKILL on slow drain. |
+| `pid-cleanup`    | Worker exits early without signaling ready; pid file gone.   |
+| `subcommand`     | Daemon mounted under a larger cobra tree (e.g. `app run`).   |
 
 Run one locally:
 
 ```
-make run minimal start
-make run minimal status
-make run minimal stop
+make run hello start
+make run hello status
+make run hello stop
 ```
 
 ## Testing

@@ -22,11 +22,6 @@ func main() {
 	serve := &cobra.Command{
 		Use:   "serve [args...]",
 		Short: "Worker that echoes its flags and positional args",
-		// Because daemonize attaches start/stop/status as children, the
-		// foreground command needs an explicit Args validator to accept
-		// arbitrary positionals (cobra would otherwise treat the first
-		// positional as an unknown subcommand).
-		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("config: port=%d verbose=%t args=%v\n", port, verbose, args)
 			close(ready)

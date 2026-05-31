@@ -22,8 +22,7 @@ import (
 )
 
 const (
-	// stopTimeout is how long stop waits for graceful exit before SIGKILL.
-	stopTimeout  = 30 * time.Second
+	// stopPollEach is how often Stop checks whether the child has exited.
 	stopPollEach = 100 * time.Millisecond
 
 	// defaultGroupID is the cobra group ID for the lifecycle subcommands;
@@ -88,6 +87,11 @@ type Daemon[T any] interface {
 	// pass nil to ungroup (list them under Additional Commands). Unset, they are
 	// grouped under "Daemon Commands:".
 	WithGroup(name *string) Daemon[T]
+	// WithStopTimeout bounds how long Stop waits for the child to exit gracefully
+	// before escalating to SIGKILL. A zero (or unset) timeout disables the
+	// deadline — Stop waits indefinitely until the child exits or the user
+	// interrupts (Ctrl+C), which always force-kills.
+	WithStopTimeout(timeout time.Duration) Daemon[T]
 
 	// Stop signals the running process (SIGTERM, escalating to SIGKILL on
 	// timeout) and waits for it to exit. Usable without building the cobra tree.
@@ -115,12 +119,13 @@ type Daemon[T any] interface {
 // DaemonImpl is the default Daemon implementation. T is the wrapped value's
 // type (and what Into returns).
 type DaemonImpl[T any] struct {
-	inner     T
-	detachSig *(<-chan struct{}) // nil = unset
-	reloadSig *syscall.Signal    // nil = reload disabled
-	name      *string            // nil = derive from command path
-	group     *string            // group title; nil (with groupSet) = ungrouped
-	groupSet  bool               // true once WithGroup was called
+	inner       T
+	detachSig   *(<-chan struct{}) // nil = unset
+	reloadSig   *syscall.Signal    // nil = reload disabled
+	name        *string            // nil = derive from command path
+	group       *string            // group title; nil (with groupSet) = ungrouped
+	groupSet    bool               // true once WithGroup was called
+	stopTimeout time.Duration      // 0 = wait forever for graceful exit
 
 	// State-file paths and the base name they derive from, resolved in buildCobra.
 	pidFile string
@@ -186,6 +191,11 @@ func (d *DaemonImpl[T]) WithGroup(name *string) Daemon[T] {
 	return d
 }
 
+func (d *DaemonImpl[T]) WithStopTimeout(timeout time.Duration) Daemon[T] {
+	d.stopTimeout = timeout
+	return d
+}
+
 // buildCobra enriches the caller's command in place with start/stop/status
 // (and optionally reload) as subcommands, wrapping its RunE so that running
 // the command directly in the foreground still owns the pid file and relays
@@ -205,6 +215,15 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	}
 	serveName := command.Name()
 	d.daemonCmd = command
+
+	// Attaching start/stop/status as children would otherwise make cobra
+	// reject any unknown first positional as a missing subcommand. Default
+	// to ArbitraryArgs so the foreground worker keeps accepting positionals
+	// (the typical case); callers that want strict validation can set their
+	// own Args before calling DetachOn.
+	if command.Args == nil {
+		command.Args = cobra.ArbitraryArgs
+	}
 
 	// State files: WithName wins, else derive from the command path so every
 	// lifecycle subcommand we attach targets the same files.
@@ -511,8 +530,14 @@ func (d *DaemonImpl[T]) Stop() error {
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(stopTimeout)
-	for time.Now().Before(deadline) {
+
+	// A zero stopTimeout means wait forever for the child to exit gracefully;
+	// Ctrl+C (or SIGTERM to this process) always escalates to SIGKILL.
+	var deadline <-chan time.Time
+	if d.stopTimeout > 0 {
+		deadline = time.After(d.stopTimeout)
+	}
+	for {
 		tail.copy()
 		if !d.IsAlive() {
 			tail.copy() // drain any final shutdown output
@@ -527,17 +552,16 @@ func (d *DaemonImpl[T]) Stop() error {
 			os.Remove(d.pidFile)
 			fmt.Printf("\nkilled (pid %d) on interrupt\n", pid)
 			return nil
+		case <-deadline:
+			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+				return fmt.Errorf("force kill (pid %d): %w", pid, err)
+			}
+			os.Remove(d.pidFile)
+			fmt.Printf("killed (pid %d) after %s timeout\n", pid, d.stopTimeout)
+			return nil
 		case <-time.After(stopPollEach):
 		}
 	}
-
-	// Graceful shutdown timed out; force kill.
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("force kill (pid %d): %w", pid, err)
-	}
-	os.Remove(d.pidFile)
-	fmt.Printf("killed (pid %d) after timeout\n", pid)
-	return nil
 }
 
 // logTail streams newly appended log bytes to stdout. A nil file (log missing,
