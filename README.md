@@ -92,6 +92,53 @@ Then:
 ./app             # bare alias for "start"
 ```
 
+## What `--help` looks like
+
+**Before** — bare cobra command:
+
+```
+$ serve --help
+Run the worker in the foreground (Ctrl-C to stop)
+
+Usage:
+  serve [flags]
+
+Flags:
+  -h, --help             help for serve
+  -m, --message string   message printed when ready (default "hello")
+```
+
+**After** — same command wrapped with `daemonize.FromCobra(...).WithReload(SIGHUP).DetachOn(ready)`:
+
+```
+$ serve --help
+Running with no subcommand is an alias for "start".
+
+Usage:
+  serve [flags]
+  serve [command]
+
+Daemon Commands:
+  reload      Signal the running `serve` to reload (hangup)
+  start       Start `serve` in the background
+  status      Report whether `serve` is running
+  stop        Stop the running `serve`
+
+Additional Commands:
+  completion  Generate the autocompletion script for the specified shell
+  help        Help about any command
+  serve       Run the worker in the foreground (Ctrl-C to stop)
+
+Flags:
+  -h, --help             help for serve
+  -m, --message string   message printed when ready (default "hello")
+
+Use "serve [command] --help" for more information about a command.
+```
+
+The wrapped command's flags (`-m`) carry through to the root, so `serve -m hi`
+and `serve start -m hi` both forward the flag to the foreground worker.
+
 ## API at a glance
 
 ```go
