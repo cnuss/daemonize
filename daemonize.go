@@ -7,6 +7,7 @@ package daemonize
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -113,8 +114,13 @@ type Daemon[T any] interface {
 	// it to exit. A Ctrl+C (or SIGTERM to this process) during the wait
 	// escalates to SIGKILL. Usable without building the cobra tree.
 	Stop() error
-	// Status reports whether the process is running and clears a stale pid file.
-	Status() error
+	// Status reports whether the process is running and clears a stale pid
+	// file as a side effect. If marshal is nil, Status writes the default
+	// text rendering to stdout (pid + pid file + log file paths). Otherwise
+	// it hands the resolved StatusResult to marshal and prints whatever
+	// bytes come back — the signature matches json.Marshal and yaml.Marshal
+	// so they drop in directly.
+	Status(marshal func(any) ([]byte, error)) error
 	// Reload sends the configured reload signal (WithReload, default SIGHUP) to
 	// the running process.
 	Reload() error
@@ -386,12 +392,24 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 		RunE:    func(cmd *cobra.Command, args []string) error { return d.Stop() },
 	}
 
+	statusFormat := statusOutputFormat("text")
 	statusCmd := &cobra.Command{
 		Use:     "status",
 		Short:   "Report whether `" + serveName + "` is running",
 		GroupID: groupID,
-		RunE:    func(cmd *cobra.Command, args []string) error { return d.Status() },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch string(statusFormat) {
+			case "json":
+				return d.Status(json.Marshal)
+			default:
+				return d.Status(nil)
+			}
+		},
 	}
+	statusCmd.Flags().VarP(&statusFormat, "output", "o", "output format (text|json)")
+	_ = statusCmd.RegisterFlagCompletionFunc("output", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		return []string{"text", "json"}, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	command.AddCommand(startCmd, stopCmd, statusCmd)
 
@@ -682,22 +700,96 @@ func (t *logTail) Close() {
 	}
 }
 
-func (d *DaemonImpl[T]) Status() error {
-	if d.ctxCancel != nil {
-		defer d.ctxCancel()
+// statusOutputFormat is the pflag.Value backing the status subcommand's
+// --output flag. It rejects anything other than "text" or "json" at parse
+// time so RunE never has to defend against unknown values.
+type statusOutputFormat string
+
+func (s *statusOutputFormat) String() string { return string(*s) }
+func (s *statusOutputFormat) Type() string   { return "string" }
+func (s *statusOutputFormat) Set(v string) error {
+	switch v {
+	case "text", "json":
+		*s = statusOutputFormat(v)
+		return nil
+	default:
+		return fmt.Errorf("must be one of: text, json")
 	}
+}
+
+// StatusResult is the structured form of the daemon's current state.
+// Pass-through marshallers handed to Status receive this; the json tags
+// match the schema documented in the status -o json command.
+type StatusResult struct {
+	State   string `json:"state"`
+	PID     int    `json:"pid,omitempty"`
+	Name    string `json:"name,omitempty"`
+	PIDFile string `json:"pid_file,omitempty"`
+	LogFile string `json:"log_file,omitempty"`
+}
+
+// computeStatus reads the pid file and resolves the daemon's current state.
+// A stale pid file is removed here as a side effect — Status relies on that
+// cleanup.
+func (d *DaemonImpl[T]) computeStatus() StatusResult {
 	pid, err := d.PID()
 	if err != nil {
-		fmt.Println("not running")
-		return nil
+		return StatusResult{State: "not_running"}
 	}
 	if !d.IsAlive() {
 		os.Remove(d.pidFile)
-		fmt.Printf("not running (cleared stale pid %d)\n", pid)
-		return nil
+		return StatusResult{
+			State:   "stale",
+			PID:     pid,
+			Name:    d.base,
+			PIDFile: d.pidFile,
+			LogFile: d.logFile,
+		}
 	}
-	fmt.Printf("running (pid %d)\n", pid)
-	fmt.Printf("pid file: %s\n", d.pidFile)
+	return StatusResult{
+		State:   "running",
+		PID:     pid,
+		Name:    d.base,
+		PIDFile: d.pidFile,
+		LogFile: d.logFile,
+	}
+}
+
+func (d *DaemonImpl[T]) Status(marshal func(any) ([]byte, error)) error {
+	if d.ctxCancel != nil {
+		defer d.ctxCancel()
+	}
+	if marshal == nil {
+		// Default to the human-readable text rendering. Stays on the same
+		// marshal-then-print path as the user-supplied case below.
+		marshal = func(v any) ([]byte, error) {
+			r, ok := v.(StatusResult)
+			if !ok {
+				return nil, fmt.Errorf("daemonize: status text marshaler: want StatusResult, got %T", v)
+			}
+			var lines []string
+			switch r.State {
+			case "not_running":
+				lines = []string{"not running"}
+			case "stale":
+				lines = []string{fmt.Sprintf("not running (cleared stale pid %d)", r.PID)}
+			case "running":
+				lines = []string{
+					fmt.Sprintf("running (pid %d)", r.PID),
+					"pid file: " + r.PIDFile,
+					"log file: " + r.LogFile,
+				}
+			default:
+				return nil, fmt.Errorf("daemonize: status text marshaler: unknown state %q", r.State)
+			}
+			return []byte(strings.Join(lines, "\n")), nil
+		}
+	}
+	b, err := marshal(d.computeStatus())
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
 	return nil
 }
 

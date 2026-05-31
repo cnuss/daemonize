@@ -251,13 +251,13 @@ func TestStopReloadNotRunning(t *testing.T) {
 
 func TestStatusWithoutCobra(t *testing.T) {
 	d := newDaemonFiles(t, "test")
-	if err := d.Status(); err != nil { // not running -> nil
+	if err := d.Status(nil); err != nil { // not running -> nil
 		t.Errorf("Status not running: %v", err)
 	}
 	if err := d.writePID(os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Status(); err != nil { // running -> nil
+	if err := d.Status(nil); err != nil { // running -> nil
 		t.Errorf("Status running: %v", err)
 	}
 }
