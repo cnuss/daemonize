@@ -1,6 +1,10 @@
 # daemonize
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cnuss/daemonize.svg)](https://pkg.go.dev/github.com/cnuss/daemonize)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cnuss/daemonize)](https://goreportcard.com/report/github.com/cnuss/daemonize)
+[![CI](https://github.com/cnuss/daemonize/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cnuss/daemonize/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/cnuss/daemonize?sort=semver)](https://github.com/cnuss/daemonize/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 `daemonize` wraps any [cobra](https://github.com/spf13/cobra) command with Unix
 daemon lifecycle controls — `start`, `stop`, `status`, `reload` — by re-execing
@@ -11,14 +15,52 @@ command.
 
 ## Quick Start
 
-Captured from [`examples/hello`](./examples/hello).
+Add the dependency, the `daemonize` import, and wrap `cmd.Execute()`:
 
-**Before** — a bare cobra worker:
+```sh
+go get github.com/cnuss/daemonize
+```
+
+```diff
+ import (
+ 	...
++	"github.com/cnuss/daemonize"
+ 	"github.com/spf13/cobra"
+ )
+
+ func main() {
+ 	...
++	ready := make(chan struct{})
+
+ 	cmd := &cobra.Command{
+ 		...
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			fmt.Printf("hello %s\n", message)
++			close(ready)
+ 			<-cmd.Context().Done()
+ 			...
+ 		},
+ 	}
+ 	...
+-	if err := cmd.Execute(); err != nil {
++	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
+ 		fmt.Fprintln(os.Stderr, "error:", err)
+ 		os.Exit(1)
+ 	}
+ }
+```
+
+(Full source: [`examples/hello/main.go`](./examples/hello/main.go).)
+
+### Before
+
+A basic cobra command:
 
 ```go
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,20 +70,23 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	var message string
 	cmd := &cobra.Command{
 		Use:   "hello",
 		Short: "Say hello",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("hello %s\n", message)
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			<-stop
+			<-cmd.Context().Done()
 			fmt.Println("stopping")
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
+	cmd.SetContext(ctx)
+
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -61,49 +106,7 @@ Flags:
   -m, --message string   who to greet (default "world")
 ```
 
-**After** — add the `daemonize` import, a `ready` channel, and swap
-`cmd.Execute()` for `daemonize.FromCobra(cmd).DetachOn(ready).Execute()`:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
-
-	"github.com/cnuss/daemonize"
-	"github.com/spf13/cobra"
-)
-
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	ready := make(chan struct{})
-
-	var message string
-	cmd := &cobra.Command{
-		Use:   "hello",
-		Short: "Say hello",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("hello %s\n", message)
-			close(ready) // tell the daemon: I'm up
-			<-cmd.Context().Done()
-			fmt.Println("stopping")
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
-	cmd.SetContext(ctx)
-
-	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-}
-```
+### After
 
 ```
 $ ./hello --help
