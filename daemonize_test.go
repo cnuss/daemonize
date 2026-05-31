@@ -280,6 +280,27 @@ func TestStopLive(t *testing.T) {
 	}
 }
 
+// FuzzDaemonEnvFor checks the env-var derivation's invariants under arbitrary
+// input: the result always carries the "_DAEMON" suffix, has no hyphens (they
+// must be normalized to underscores), and is upper-case.
+func FuzzDaemonEnvFor(f *testing.F) {
+	for _, seed := range []string{"hello", "widget", "my-server", "with-dashes", "UPPER", ""} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, base string) {
+		got := daemonEnvFor(base)
+		if !strings.HasSuffix(got, "_DAEMON") {
+			t.Errorf("daemonEnvFor(%q) = %q, want suffix _DAEMON", base, got)
+		}
+		if strings.Contains(got, "-") {
+			t.Errorf("daemonEnvFor(%q) = %q, contains hyphen", base, got)
+		}
+		if got != strings.ToUpper(got) {
+			t.Errorf("daemonEnvFor(%q) = %q, want all uppercase", base, got)
+		}
+	})
+}
+
 func TestForwardArgs(t *testing.T) {
 	root := &cobra.Command{Use: "server"}
 	start := &cobra.Command{Use: "start"}
