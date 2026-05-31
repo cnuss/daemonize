@@ -2,9 +2,11 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -255,6 +257,96 @@ func TestStopInterruptEscalates(t *testing.T) {
 	out := r.runInterrupt(t, []string{"stop"}, 300*time.Millisecond)
 	wants(t, out, "shutting down", "killed", "on interrupt")
 	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestStatusShowsLogFile(t *testing.T) {
+	r := newRunner(t, "hello")
+	wants(t, r.run(t, "start", "-m", "world"), "started")
+	out := r.run(t, "status")
+	wants(t, out, "running (pid ", "pid file:", "log file:")
+}
+
+func TestStatusJSONRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	wants(t, r.run(t, "start", "-m", "world"), "started")
+
+	out := r.run(t, "status", "-o", "json")
+	var s map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &s); err != nil {
+		t.Fatalf("status -o json did not parse:\n%s\n%v", out, err)
+	}
+	if s["state"] != "running" {
+		t.Errorf("state = %v, want \"running\"", s["state"])
+	}
+	if pid, ok := s["pid"].(float64); !ok || pid <= 0 {
+		t.Errorf("pid = %v, want positive number", s["pid"])
+	}
+	for _, k := range []string{"name", "pid_file", "log_file"} {
+		if v, ok := s[k].(string); !ok || v == "" {
+			t.Errorf("%q = %v, want non-empty string", k, s[k])
+		}
+	}
+}
+
+func TestStatusJSONNotRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	out := r.run(t, "status", "-o", "json")
+	var s map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &s); err != nil {
+		t.Fatalf("status -o json did not parse:\n%s\n%v", out, err)
+	}
+	if s["state"] != "not_running" {
+		t.Errorf("state = %v, want \"not_running\"", s["state"])
+	}
+	if _, present := s["pid"]; present {
+		t.Errorf("pid should be omitted when not running, got %v", s["pid"])
+	}
+}
+
+func TestStatusJSONStale(t *testing.T) {
+	r := newRunner(t, "hello")
+	wants(t, r.run(t, "start", "-m", "world"), "started")
+
+	// Pull the worker's pid out of the status text, then kill it out-of-band
+	// so the pid file is left stale.
+	pidStr := between(r.run(t, "status"), "running (pid ", ")")
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		t.Fatalf("parse pid from status: %v", err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill %d: %v", pid, err)
+	}
+	for i := 0; i < 100; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	out := r.run(t, "status", "-o", "json")
+	var s map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &s); err != nil {
+		t.Fatalf("status -o json did not parse:\n%s\n%v", out, err)
+	}
+	if s["state"] != "stale" {
+		t.Errorf("state = %v, want \"stale\"", s["state"])
+	}
+
+	// The pid file should now be cleared; a follow-up status reports not_running.
+	out = r.run(t, "status", "-o", "json")
+	_ = json.Unmarshal([]byte(strings.TrimSpace(out)), &s)
+	if s["state"] != "not_running" {
+		t.Errorf("after stale cleanup, state = %v, want \"not_running\"", s["state"])
+	}
+}
+
+func TestStatusUnknownFormat(t *testing.T) {
+	r := newRunner(t, "hello")
+	out := r.run(t, "status", "-o", "yaml")
+	// pflag.Value's Set returns the error before RunE; cobra wraps it as
+	// "invalid argument ... must be one of: text, json".
+	wants(t, out, "invalid argument", "must be one of: text, json")
 }
 
 // between returns the substring of s that sits between the first occurrence
