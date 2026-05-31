@@ -65,7 +65,7 @@ func commandFileBase(cmd *cobra.Command) string {
 }
 
 // Daemon is the builder for a background-lifecycle wrapper around a foreground
-// command. Configure it with the With* methods, then call IntoCobra. Obtain one
+// command. Configure it with the With* methods, then call DetachOn. Obtain one
 // from FromCobra.
 type Daemon[T any] interface {
 	// FromCobra wraps a cobra command, retyping the builder to *cobra.Command so
@@ -186,12 +186,14 @@ func (d *DaemonImpl[T]) WithGroup(name *string) Daemon[T] {
 	return d
 }
 
-// buildCobra assembles the root command with start/stop/status/reload.
+// buildCobra enriches the caller's command in place with start/stop/status
+// (and optionally reload) as subcommands, wrapping its RunE so that running
+// the command directly in the foreground still owns the pid file and relays
+// readiness — making stop/reload/status work against both foreground and
+// daemonized runs.
 //
-// "start" re-execs this binary as a detached child running the wrapped command
-// (forwarding its flags), writing the child PID to the pid file. The wrapped
-// command owns that file whenever it runs in the foreground (directly or as the
-// daemon child), making stop/reload/status work against foreground runs too.
+// "start" re-execs this binary as a detached child running the wrapped
+// command (forwarding its flags), writing the child PID to the pid file.
 func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	command, ok := any(d.inner).(*cobra.Command)
 	if !ok || command == nil {
@@ -202,30 +204,67 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 		detachSig = *d.detachSig
 	}
 	serveName := command.Name()
+	d.daemonCmd = command
 
-	// Wrap the caller's command in a daemon-owned "serve" command rather than
-	// mutating it. The wrapper shares the original's flags (so parsing sets the
-	// same vars) and delegates to its PreRunE/RunE. RunE is set below, once the
-	// state files are known.
-	daemonCmd := &cobra.Command{
-		Use:     command.Use,
-		Short:   command.Short,
-		Long:    command.Long,
-		Args:    command.Args,
-		PreRunE: command.PreRunE,
+	// State files: WithName wins, else derive from the command path so every
+	// lifecycle subcommand we attach targets the same files.
+	base := ""
+	if d.name != nil {
+		base = *d.name
 	}
-	daemonCmd.Flags().AddFlagSet(command.Flags())
+	if base == "" {
+		base = commandFileBase(command)
+	}
+	d.base = base
+	d.pidFile, d.logFile = stateFiles(serveName, base)
 
-	root := &cobra.Command{
-		Use:           command.Use,
-		Short:         "Run " + serveName + " in the background with lifecycle controls",
-		Long:          "Running with no subcommand is an alias for \"start\".",
-		SilenceUsage:  true,
-		SilenceErrors: true,
+	// Wrap PreRunE: gate foreground runs the same way "start" is gated, so
+	// running the command directly while a daemon is alive fails fast instead
+	// of clobbering the pid file. Skip the gate for the daemon-launched child:
+	// "start" already wrote its pid before exec, so the gate would otherwise
+	// see the child as "already running" against its own entry.
+	origPreRunE := command.PreRunE
+	startGate := d.ensurePid(false)
+	command.PreRunE = func(cmd *cobra.Command, args []string) error {
+		if os.Getenv(daemonEnvFor(d.base)) == "" {
+			if err := startGate(cmd, args); err != nil {
+				return err
+			}
+		}
+		if origPreRunE != nil {
+			return origPreRunE(cmd, args)
+		}
+		return nil
 	}
-	root.Flags().AddFlagSet(command.Flags())
-	root.AddCommand(daemonCmd)
-	d.daemonCmd = daemonCmd
+
+	// Wrap RunE: own the pid file for the lifetime of the foreground run and
+	// relay readiness to the parent as SIGUSR1 (opaque to the wrapped command,
+	// which only closes detachSig). The relay is a no-op outside the daemon.
+	origRunE := command.RunE
+	origRun := command.Run
+	command.Run = nil
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := d.writePID(os.Getpid()); err != nil {
+			return err
+		}
+		defer os.Remove(d.pidFile)
+
+		if detachSig != nil {
+			go func() {
+				<-detachSig
+				if os.Getenv(daemonEnvFor(d.base)) != "" {
+					syscall.Kill(os.Getppid(), syscall.SIGUSR1)
+				}
+			}()
+		}
+		if origRunE != nil {
+			return origRunE(cmd, args)
+		}
+		if origRun != nil {
+			origRun(cmd, args)
+		}
+		return nil
+	}
 
 	// Lifecycle commands are grouped by default. WithGroup(nil) ungroups them
 	// (groupID stays "", so cobra lists them under Additional Commands);
@@ -242,47 +281,12 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	}
 	if grouped {
 		groupID = defaultGroupID
-		root.AddGroup(&cobra.Group{ID: groupID, Title: title + ":"})
-	}
-
-	// State files: WithName wins, else derive from the now-attached command path
-	// so every lifecycle command in this tree targets the same files.
-	base := ""
-	if d.name != nil {
-		base = *d.name
-	}
-	if base == "" {
-		base = commandFileBase(daemonCmd)
-	}
-	d.base = base
-	d.pidFile, d.logFile = stateFiles(serveName, base)
-
-	// With the state files known, wire the wrapper's RunE: own the pid file and
-	// relay readiness to the parent as SIGUSR1 (opaque to the wrapped command,
-	// which only closes detachSig). The relay is a no-op outside the daemon.
-	origRun := command.RunE
-	daemonCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		if err := d.writePID(os.Getpid()); err != nil {
-			return err
-		}
-		defer os.Remove(d.pidFile)
-
-		if detachSig != nil {
-			go func() {
-				<-detachSig
-				if os.Getenv(daemonEnvFor(d.base)) != "" {
-					syscall.Kill(os.Getppid(), syscall.SIGUSR1)
-				}
-			}()
-		}
-		return origRun(cmd, args)
+		command.AddGroup(&cobra.Group{ID: groupID, Title: title + ":"})
 	}
 
 	startRun := func(cmd *cobra.Command, args []string) error {
 		return d.start(forwardArgs(cmd))
 	}
-	root.PreRunE = d.ensurePid(false)
-	root.RunE = startRun
 
 	startCmd := &cobra.Command{
 		Use:     "start",
@@ -307,12 +311,12 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 		RunE:    func(cmd *cobra.Command, args []string) error { return d.Status() },
 	}
 
-	root.AddCommand(startCmd, stopCmd, statusCmd)
+	command.AddCommand(startCmd, stopCmd, statusCmd)
 
 	// reload is registered only when a signal was configured via WithReload.
 	if d.reloadSig != nil {
 		sig := *d.reloadSig
-		root.AddCommand(&cobra.Command{
+		command.AddCommand(&cobra.Command{
 			Use:     "reload",
 			Short:   fmt.Sprintf("Signal the running `%s` to reload (%s)", serveName, sig),
 			GroupID: groupID,
@@ -320,7 +324,7 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 			RunE:    func(cmd *cobra.Command, args []string) error { return d.Reload() },
 		})
 	}
-	return root
+	return command
 }
 
 // ensurePid returns a PreRunE that gates on the daemon's running state:
@@ -619,14 +623,14 @@ func (d *DaemonImpl[T]) IsAlive() bool {
 
 func (d *DaemonImpl[T]) PIDFile() (string, error) {
 	if d.pidFile == "" {
-		return "", fmt.Errorf("daemonize: pid file not resolved (call Into first)")
+		return "", fmt.Errorf("daemonize: pid file not resolved (call DetachOn first)")
 	}
 	return d.pidFile, nil
 }
 
 func (d *DaemonImpl[T]) LogFile() (string, error) {
 	if d.logFile == "" {
-		return "", fmt.Errorf("daemonize: log file not resolved (call Into first)")
+		return "", fmt.Errorf("daemonize: log file not resolved (call DetachOn first)")
 	}
 	return d.logFile, nil
 }

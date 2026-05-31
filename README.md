@@ -11,8 +11,12 @@ command.
 
 ## Features
 
-- **Mutation-free**: the caller's `*cobra.Command` is wrapped, never modified
-  (`RunE`, flags, `Use`, etc. all untouched).
+- **In-place enrichment**: `FromCobra(cmd).DetachOn(ready)` returns the same
+  `*cobra.Command`, now with `start`/`stop`/`status` (and optionally `reload`)
+  attached as subcommands. Running the command directly still invokes its
+  original `RunE` (the foreground worker); the wrapped `RunE` owns the pid
+  file and relays readiness, so `stop`/`status` work against foreground runs
+  too.
 - **Channel-based readiness relay**: the wrapped command closes a
   `chan struct{}` when bound/ready; the daemon translates that to `SIGUSR1`
   internally so the parent can stop streaming and detach. Opaque to the wrapped
@@ -25,8 +29,8 @@ command.
   `<UserCacheDir>/.<command-name>/<base>.{pid,log}`. Override with `WithName`.
 - **Help grouping**: lifecycle subcommands are grouped (`Daemon Commands:` by
   default). Customize or disable with `WithGroup`.
-- **Nestable**: the assembled root command can be mounted under a larger cobra
-  tree — `start` re-execs along the full command path (`foo run serve …`).
+- **Nestable**: the enriched command can be mounted under a larger cobra
+  tree — `start` re-execs along the full command path (`foo run …`).
 - **Generic builder**: `Daemon[T]` is parameterized; today `T == *cobra.Command`
   via `FromCobra`. Future backends can plug in.
 
@@ -88,9 +92,13 @@ Then:
 ./app status      # running (pid N)
 ./app reload      # SIGHUP to the running process
 ./app stop        # SIGTERM, escalating to SIGKILL on timeout
-./app serve       # run the wrapped command in the foreground
-./app             # bare alias for "start"
+./app             # run the wrapped command in the foreground
 ```
+
+If your foreground command takes positional args, set
+`Args: cobra.ArbitraryArgs` (or a stricter validator). Without it, cobra
+treats the first unknown positional as a missing subcommand once
+`start`/`stop`/`status` are attached.
 
 ## What `--help` looks like
 
@@ -108,11 +116,11 @@ Flags:
   -m, --message string   message printed when ready (default "hello")
 ```
 
-**After** — same command wrapped with `daemonize.FromCobra(...).WithReload(SIGHUP).DetachOn(ready)`:
+**After** — same command after `daemonize.FromCobra(...).WithReload(SIGHUP).DetachOn(ready)`:
 
 ```
 $ serve --help
-Running with no subcommand is an alias for "start".
+Run the worker in the foreground (Ctrl-C to stop)
 
 Usage:
   serve [flags]
@@ -127,7 +135,6 @@ Daemon Commands:
 Additional Commands:
   completion  Generate the autocompletion script for the specified shell
   help        Help about any command
-  serve       Run the worker in the foreground (Ctrl-C to stop)
 
 Flags:
   -h, --help             help for serve
@@ -136,8 +143,10 @@ Flags:
 Use "serve [command] --help" for more information about a command.
 ```
 
-The wrapped command's flags (`-m`) carry through to the root, so `serve -m hi`
-and `serve start -m hi` both forward the flag to the foreground worker.
+The command's own `Short` and flags stay as the user wrote them; daemonize
+only adds the lifecycle subcommands and wraps `RunE` to own the pid file.
+`serve -m hi` runs the worker in the foreground; `serve start -m hi`
+daemonizes it with the same flag forwarded.
 
 ## API at a glance
 

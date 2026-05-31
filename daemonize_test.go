@@ -83,7 +83,7 @@ func TestGrouping(t *testing.T) {
 
 func TestBuildHasLifecycleCommands(t *testing.T) {
 	root := NewDaemon().FromCobra(newInner()).DetachOn(nil)
-	for _, name := range []string{"serve", "start", "stop", "status"} {
+	for _, name := range []string{"start", "stop", "status"} {
 		if !hasCmd(root, name) {
 			t.Errorf("missing subcommand %q", name)
 		}
@@ -105,21 +105,27 @@ func TestStateFileNames(t *testing.T) {
 	}
 }
 
-func TestIntoCobraDoesNotMutateCommand(t *testing.T) {
+func TestDetachOnEnrichesCommand(t *testing.T) {
 	cmd := newInner()
-	wantRunE := reflect.ValueOf(cmd.RunE).Pointer()
-	wantUse := cmd.Use
+	origRunE := reflect.ValueOf(cmd.RunE).Pointer()
+	origUse := cmd.Use
 
-	NewDaemon().FromCobra(cmd).WithReload(syscall.SIGHUP).DetachOn(nil)
+	got := NewDaemon().FromCobra(cmd).WithReload(syscall.SIGHUP).DetachOn(nil)
 
-	if reflect.ValueOf(cmd.RunE).Pointer() != wantRunE {
-		t.Error("IntoCobra rewrote command.RunE")
+	// DetachOn returns the same command, now enriched with lifecycle subcommands.
+	if got != cmd {
+		t.Error("DetachOn should return the same command it was given")
 	}
-	if cmd.Use != wantUse {
-		t.Errorf("IntoCobra changed command.Use to %q", cmd.Use)
+	if cmd.Use != origUse {
+		t.Errorf("DetachOn changed command.Use to %q", cmd.Use)
 	}
-	if cmd.HasParent() {
-		t.Error("IntoCobra attached the command to a parent")
+	if reflect.ValueOf(cmd.RunE).Pointer() == origRunE {
+		t.Error("DetachOn should have wrapped command.RunE")
+	}
+	for _, name := range []string{"start", "stop", "status", "reload"} {
+		if !hasCmd(cmd, name) {
+			t.Errorf("DetachOn did not attach %q as a subcommand", name)
+		}
 	}
 }
 
