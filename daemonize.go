@@ -6,6 +6,7 @@
 package daemonize
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,27 @@ type Daemon[T any] interface {
 	// pass nil to ungroup (list them under Additional Commands). Unset, they are
 	// grouped under "Daemon Commands:".
 	WithGroup(name *string) Daemon[T]
+	// WithContext sets the parent context that DetachOn installs on the
+	// wrapped command. Pass context.Background() for the conventional
+	// rooted context, or another context to inherit deadlines, values, or
+	// cancellation from an outer scope.
+	//
+	// Pass nil to opt out of any context auto-wiring entirely: in that case
+	// DetachOn will not call cmd.SetContext, and WithShutdownSignal is
+	// ignored. The caller takes full responsibility for the command's
+	// context, just as if neither method had been called.
+	WithContext(parent context.Context) Daemon[T]
+	// WithShutdownSignal installs a signal.NotifyContext that cancels the
+	// command's context when any of the listed signals fire. DetachOn
+	// composes it with the WithContext parent (or context.Background() if
+	// WithContext is unset):
+	//   ctx, cancel := signal.NotifyContext(parent, sigs...)
+	//   cmd.SetContext(ctx)
+	// The wrapped command can then use <-cmd.Context().Done() to react
+	// without wiring signal.Notify itself. Stop, Reload, Status, and the
+	// wrapped RunE all call cancel on exit so the underlying goroutine is
+	// released. If WithContext(nil) was called, this is a no-op.
+	WithShutdownSignal(sigs ...os.Signal) Daemon[T]
 	// Stop sends SIGTERM to the running process and waits indefinitely for
 	// it to exit. A Ctrl+C (or SIGTERM to this process) during the wait
 	// escalates to SIGKILL. Usable without building the cobra tree.
@@ -120,6 +142,22 @@ type DaemonImpl[T any] struct {
 	name      *string            // nil = derive from command path
 	group     *string            // group title; nil (with groupSet) = ungrouped
 	groupSet  bool               // true once WithGroup was called
+
+	// ctxParent is the parent context set via WithContext. ctxParentSet
+	// distinguishes "WithContext(nil)" (opt-out) from "WithContext never
+	// called" (use defaults).
+	ctxParent    context.Context
+	ctxParentSet bool
+
+	// shutdownSigs are the signals registered via WithShutdownSignal;
+	// shutdownSigsSet records whether the method was called.
+	shutdownSigs    []os.Signal
+	shutdownSigsSet bool
+
+	// ctxCancel releases the signal.NotifyContext goroutine. Set during
+	// buildCobra when context auto-wiring is configured; defaults to a no-op so callers
+	// of Stop/Reload/Status can defer it unconditionally.
+	ctxCancel context.CancelFunc
 
 	// State-file paths and the base name they derive from, resolved in buildCobra.
 	pidFile string
@@ -185,6 +223,18 @@ func (d *DaemonImpl[T]) WithGroup(name *string) Daemon[T] {
 	return d
 }
 
+func (d *DaemonImpl[T]) WithContext(parent context.Context) Daemon[T] {
+	d.ctxParent = parent
+	d.ctxParentSet = true
+	return d
+}
+
+func (d *DaemonImpl[T]) WithShutdownSignal(sigs ...os.Signal) Daemon[T] {
+	d.shutdownSigs = sigs
+	d.shutdownSigsSet = true
+	return d
+}
+
 // buildCobra enriches the caller's command in place with start/stop/status
 // (and optionally reload) as subcommands, wrapping its RunE so that running
 // the command directly in the foreground still owns the pid file and relays
@@ -212,6 +262,29 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	// own Args before calling DetachOn.
 	if command.Args == nil {
 		command.Args = cobra.ArbitraryArgs
+	}
+
+	// Context auto-wiring. Three knobs feed into this:
+	//   - WithContext(nil) explicitly opts out: skip everything.
+	//   - WithContext(parent) sets the parent; absent it, context.Background().
+	//   - WithShutdownSignal(sigs...) wraps the parent in signal.NotifyContext.
+	// At least one of WithContext / WithShutdownSignal must be set for any
+	// wiring to happen; otherwise the wrapped command's context is left as
+	// the caller arranged it (cobra defaults it to context.Background()).
+	d.ctxCancel = func() {}
+	optedOut := d.ctxParentSet && d.ctxParent == nil
+	if !optedOut && (d.ctxParentSet || d.shutdownSigsSet) {
+		parent := d.ctxParent
+		if parent == nil {
+			parent = context.Background()
+		}
+		if d.shutdownSigsSet && len(d.shutdownSigs) > 0 {
+			ctx, cancel := signal.NotifyContext(parent, d.shutdownSigs...)
+			d.ctxCancel = cancel
+			command.SetContext(ctx)
+		} else {
+			command.SetContext(parent)
+		}
 	}
 
 	// State files: WithName wins, else derive from the command path so every
@@ -252,6 +325,7 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	origRun := command.Run
 	command.Run = nil
 	command.RunE = func(cmd *cobra.Command, args []string) error {
+		defer d.ctxCancel()
 		if err := d.writePID(os.Getpid()); err != nil {
 			return err
 		}
@@ -516,6 +590,9 @@ func (d *DaemonImpl[T]) streamUntilReady(sigCh chan os.Signal, pid int) startRes
 }
 
 func (d *DaemonImpl[T]) Stop() error {
+	if d.ctxCancel != nil {
+		defer d.ctxCancel()
+	}
 	pid, err := d.PID()
 	if err != nil {
 		fmt.Println("not running")
@@ -606,6 +683,9 @@ func (t *logTail) Close() {
 }
 
 func (d *DaemonImpl[T]) Status() error {
+	if d.ctxCancel != nil {
+		defer d.ctxCancel()
+	}
 	pid, err := d.PID()
 	if err != nil {
 		fmt.Println("not running")
@@ -622,6 +702,9 @@ func (d *DaemonImpl[T]) Status() error {
 }
 
 func (d *DaemonImpl[T]) Reload() error {
+	if d.ctxCancel != nil {
+		defer d.ctxCancel()
+	}
 	sig := syscall.Signal(syscall.SIGHUP)
 	if d.reloadSig != nil {
 		sig = *d.reloadSig

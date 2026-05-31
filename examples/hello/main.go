@@ -3,10 +3,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 
 	"github.com/cnuss/daemonize"
@@ -14,8 +12,6 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 	ready := make(chan struct{})
 
 	var message string
@@ -31,9 +27,11 @@ func main() {
 		},
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "world", "who to greet")
-	cmd.SetContext(ctx)
 
-	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
+	if err := daemonize.FromCobra(cmd).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
+		DetachOn(ready).
+		Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
