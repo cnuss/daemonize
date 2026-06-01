@@ -41,7 +41,8 @@ Deep-link by filename; line numbers will drift.
 | Implementation struct + `New[T]` constructor         | [`v1alpha1/impl.go`](./v1alpha1/impl.go)                           |
 | Builder methods (`FromCobra`, `DetachOn`, `With*`)   | [`v1alpha1/builder.go`](./v1alpha1/builder.go)                     |
 | Cobra wiring (`buildCobra`, `ensurePid`, `--output`) | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
-| `start` subcommand (fork + exec, `streamUntilReady`) | [`v1alpha1/start.go`](./v1alpha1/start.go)                         |
+| `start` subcommand (fork + exec, `startCobra`)       | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
+| `streamUntilReady` + `startResult` enum              | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
 | `Stop` / `Status` / `Reload`, `computeStatus`        | [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go)                 |
 | `IsAlive` / `PIDFile` / `LogFile` / `Name` / `PID`   | [`v1alpha1/accessors.go`](./v1alpha1/accessors.go)                 |
 | State files, env-var derivation, log tail            | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
@@ -78,7 +79,7 @@ memory.
   Ctrl+C and explicitly `SIGTERM`s the child (see `Stop` in
   [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go) and the
   start-interrupt branch in
-  [`v1alpha1/start.go`](./v1alpha1/start.go)).
+  [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)).
 - **Positional args need an explicit `Args` validator.** Once
   start/stop/status are attached as children of the wrapped command,
   cobra rejects unknown positionals as missing subcommands. The
