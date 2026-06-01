@@ -1,4 +1,4 @@
-package daemonize
+package v1alpha1
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cnuss/daemonize/v1"
 )
 
 func (d *DaemonImpl[T]) Stop() error {
@@ -65,14 +67,14 @@ func (d *DaemonImpl[T]) Stop() error {
 // computeStatus reads the pid file and resolves the daemon's current state.
 // A stale pid file is removed here as a side effect — Status relies on that
 // cleanup.
-func (d *DaemonImpl[T]) computeStatus() StatusResult {
+func (d *DaemonImpl[T]) computeStatus() v1.StatusResult {
 	pid, err := d.PID()
 	if err != nil {
-		return StatusResult{State: "not_running"}
+		return v1.StatusResult{State: "not_running"}
 	}
 	if !d.IsAlive() {
 		os.Remove(d.pidFile)
-		return StatusResult{
+		return v1.StatusResult{
 			State:   "stale",
 			PID:     pid,
 			Name:    d.base,
@@ -80,7 +82,7 @@ func (d *DaemonImpl[T]) computeStatus() StatusResult {
 			LogFile: d.logFile,
 		}
 	}
-	return StatusResult{
+	return v1.StatusResult{
 		State:   "running",
 		PID:     pid,
 		Name:    d.base,
@@ -97,7 +99,7 @@ func (d *DaemonImpl[T]) Status(marshal func(any) ([]byte, error)) error {
 		// Default to the human-readable text rendering. Stays on the same
 		// marshal-then-print path as the user-supplied case below.
 		marshal = func(v any) ([]byte, error) {
-			r, ok := v.(StatusResult)
+			r, ok := v.(v1.StatusResult)
 			if !ok {
 				return nil, fmt.Errorf("daemonize: status text marshaler: want StatusResult, got %T", v)
 			}

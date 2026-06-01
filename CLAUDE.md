@@ -12,35 +12,51 @@ public API live in the [README](./README.md). Reading order for a
 fresh session:
 
 1. [README — Quick Start + API at a glance](./README.md)
-2. [`api.go`](./api.go) — public `Daemon[T]` interface + `StatusResult`
-3. [`examples/hello/main.go`](./examples/hello/main.go) — minimal call
-   site
+2. [`v1/api.go`](./v1/api.go) — public `Daemon[T]` interface + `StatusResult`
+3. [`examples/hello/main.go`](./examples/hello/main.go) — minimal call site
+
+## Module layout
+
+Three packages, Kubernetes-style versioning:
+
+```
+github.com/cnuss/daemonize           — root façade. Stable surface.
+github.com/cnuss/daemonize/v1        — stable Daemon[T] interface + StatusResult.
+github.com/cnuss/daemonize/v1alpha1  — current implementation. May change
+                                       between alpha revisions.
+```
+
+Application code imports root (`daemonize.FromCobra(cmd)…`). Code that
+needs to declare types against the interface imports `v1`. Direct
+access to the `DaemonImpl[T]` struct lives in `v1alpha1`.
 
 ## Where to find things
 
-The library is split across one file per concern, all in package
-`daemonize`. Deep-link to filenames; line numbers will drift.
+Deep-link by filename; line numbers will drift.
 
-| Topic                       | Source                                                       |
-| --------------------------- | ------------------------------------------------------------ |
-| Package doc + constants     | [`daemonize.go`](./daemonize.go)                             |
-| Public `Daemon[T]` + `StatusResult` | [`api.go`](./api.go)                                 |
-| Builder methods, `DaemonImpl[T]` struct | [`impl.go`](./impl.go)                           |
-| Cobra wiring (`buildCobra`, `ensurePid`, `--output` flag) | [`cobra.go`](./cobra.go) |
-| `start` subcommand (fork + exec, stream until ready) | [`start.go`](./start.go)        |
-| `Stop` / `Status` / `Reload`, `computeStatus` | [`lifecycle.go`](./lifecycle.go)      |
-| `IsAlive` / `PIDFile` / `LogFile` / `Name` / `PID` / `writePID` | [`accessors.go`](./accessors.go) |
-| State-file paths, env-var derivation, log tail | [`util.go`](./util.go)              |
-| Build / lint / test commands | [`Makefile`](./Makefile)                                     |
-| Release + skip-release regex | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)     |
-| CodeQL scan                 | [`.github/workflows/codeql.yml`](./.github/workflows/codeql.yml) |
-| OpenSSF Scorecard scan      | [`.github/workflows/scorecard.yml`](./.github/workflows/scorecard.yml) |
-| Dependabot config           | [`.github/dependabot.yml`](./.github/dependabot.yml)         |
-| Cosign verification recipe  | [`SECURITY.md`](./SECURITY.md)                               |
-| Dev loop + release docs     | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                       |
-| Worked examples             | [`examples/`](./examples)                                    |
-| e2e harness + runner        | [`e2e/e2e_test.go`](./e2e/e2e_test.go)                       |
-| godoc examples              | [`example_test.go`](./example_test.go)                       |
+| Topic                                                | Source                                                             |
+| ---------------------------------------------------- | ------------------------------------------------------------------ |
+| Façade (`NewDaemon`, `FromCobra`)                    | [`daemonize.go`](./daemonize.go)                                   |
+| Stable interface (`Daemon[T]` + `StatusResult`)      | [`v1/api.go`](./v1/api.go)                                         |
+| Implementation struct + `New[T]` constructor         | [`v1alpha1/impl.go`](./v1alpha1/impl.go)                           |
+| Builder methods (`FromCobra`, `DetachOn`, `With*`)   | [`v1alpha1/builder.go`](./v1alpha1/builder.go)                     |
+| Cobra wiring (`buildCobra`, `ensurePid`, `--output`) | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
+| `start` subcommand (fork + exec, `streamUntilReady`) | [`v1alpha1/start.go`](./v1alpha1/start.go)                         |
+| `Stop` / `Status` / `Reload`, `computeStatus`        | [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go)                 |
+| `IsAlive` / `PIDFile` / `LogFile` / `Name` / `PID`   | [`v1alpha1/accessors.go`](./v1alpha1/accessors.go)                 |
+| State files, env-var derivation, log tail            | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
+| Package constants                                    | [`v1alpha1/consts.go`](./v1alpha1/consts.go)                       |
+| Build / lint / test commands                         | [`Makefile`](./Makefile)                                           |
+| Release + skip-release regex                         | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)           |
+| CodeQL scan                                          | [`.github/workflows/codeql.yml`](./.github/workflows/codeql.yml)   |
+| OpenSSF Scorecard scan                               | [`.github/workflows/scorecard.yml`](./.github/workflows/scorecard.yml) |
+| Dependabot config                                    | [`.github/dependabot.yml`](./.github/dependabot.yml)               |
+| Cosign verification recipe                           | [`SECURITY.md`](./SECURITY.md)                                     |
+| Dev loop + release docs                              | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                             |
+| Worked examples                                      | [`examples/`](./examples)                                          |
+| e2e harness + runner                                 | [`e2e/e2e_test.go`](./e2e/e2e_test.go)                             |
+| godoc examples                                       | [`v1/example_test.go`](./v1/example_test.go)                       |
+| In-package unit tests + fuzz target                  | [`v1alpha1/daemon_test.go`](./v1alpha1/daemon_test.go)             |
 
 ## Conventions agents miss
 
@@ -60,14 +76,22 @@ memory.
 - **The daemon child doesn't receive terminal SIGINT.** It runs in
   its own session via `SysProcAttr{Setsid: true}`. The parent gets
   Ctrl+C and explicitly `SIGTERM`s the child (see `Stop` in
-  [`lifecycle.go`](./lifecycle.go) and the start-interrupt branch in
-  [`start.go`](./start.go)).
+  [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go) and the
+  start-interrupt branch in
+  [`v1alpha1/start.go`](./v1alpha1/start.go)).
 - **Positional args need an explicit `Args` validator.** Once
   start/stop/status are attached as children of the wrapped command,
   cobra rejects unknown positionals as missing subcommands. The
   library defaults `command.Args` to `cobra.ArbitraryArgs` when
   unset; set a stricter one if you want validation. The defaulting
-  lives in `buildCobra` ([`cobra.go`](./cobra.go)).
+  lives in `buildCobra`
+  ([`v1alpha1/cobra.go`](./v1alpha1/cobra.go)).
+- **godoc example funcs can't bind to generic types.** `go vet`
+  rejects `ExampleDaemon_WithReload` in `v1` because `Daemon` is
+  parameterized — its example checker hasn't caught up with
+  generics. We work around it by using package-level example names
+  (`Example_withReload`) instead. See
+  [`v1/example_test.go`](./v1/example_test.go).
 - **Skip-release token must be line-anchored.** The regex is in
   [`ci.yml`](./.github/workflows/ci.yml) (`resolve tag` step):
   `^[[:space:]]*\[skip-release\][[:space:]]*$`. Inline prose mentions

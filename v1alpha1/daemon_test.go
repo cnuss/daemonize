@@ -1,4 +1,4 @@
-package daemonize
+package v1alpha1
 
 import (
 	"os"
@@ -46,12 +46,12 @@ func deadPID(t *testing.T) int {
 }
 
 func TestReloadOptIn(t *testing.T) {
-	root := NewDaemon().FromCobra(newInner()).DetachOn(nil)
+	root := New[any]().FromCobra(newInner()).DetachOn(nil)
 	if hasCmd(root, "reload") {
 		t.Error("reload should be absent without WithReload")
 	}
 
-	root = NewDaemon().FromCobra(newInner()).WithReload(syscall.SIGHUP).DetachOn(nil)
+	root = New[any]().FromCobra(newInner()).WithReload(syscall.SIGHUP).DetachOn(nil)
 	if !hasCmd(root, "reload") {
 		t.Error("reload should be present with WithReload")
 	}
@@ -59,7 +59,7 @@ func TestReloadOptIn(t *testing.T) {
 
 func TestGrouping(t *testing.T) {
 	// Default: lifecycle commands grouped under defaultGroupID.
-	root := NewDaemon().FromCobra(newInner()).DetachOn(nil)
+	root := New[any]().FromCobra(newInner()).DetachOn(nil)
 	if g := cmdByName(root, "start").GroupID; g != defaultGroupID {
 		t.Errorf("default start GroupID = %q, want %q", g, defaultGroupID)
 	}
@@ -68,21 +68,21 @@ func TestGrouping(t *testing.T) {
 	}
 
 	// WithGroup(nil): ungrouped (empty GroupID).
-	root = NewDaemon().FromCobra(newInner()).WithGroup(nil).DetachOn(nil)
+	root = New[any]().FromCobra(newInner()).WithGroup(nil).DetachOn(nil)
 	if g := cmdByName(root, "start").GroupID; g != "" {
 		t.Errorf("WithGroup(nil) start GroupID = %q, want empty", g)
 	}
 
 	// WithGroup(&title): custom group.
 	title := "Lifecycle"
-	root = NewDaemon().FromCobra(newInner()).WithGroup(&title).DetachOn(nil)
+	root = New[any]().FromCobra(newInner()).WithGroup(&title).DetachOn(nil)
 	if g := cmdByName(root, "start").GroupID; g != defaultGroupID {
 		t.Errorf("WithGroup(&title) start GroupID = %q, want %q", g, defaultGroupID)
 	}
 }
 
 func TestBuildHasLifecycleCommands(t *testing.T) {
-	root := NewDaemon().FromCobra(newInner()).DetachOn(nil)
+	root := New[any]().FromCobra(newInner()).DetachOn(nil)
 	for _, name := range []string{"start", "stop", "status"} {
 		if !hasCmd(root, name) {
 			t.Errorf("missing subcommand %q", name)
@@ -110,7 +110,7 @@ func TestDetachOnEnrichesCommand(t *testing.T) {
 	origRunE := reflect.ValueOf(cmd.RunE).Pointer()
 	origUse := cmd.Use
 
-	got := NewDaemon().FromCobra(cmd).WithReload(syscall.SIGHUP).DetachOn(nil)
+	got := New[any]().FromCobra(cmd).WithReload(syscall.SIGHUP).DetachOn(nil)
 
 	// DetachOn returns the same command, now enriched with lifecycle subcommands.
 	if got != cmd {
@@ -130,7 +130,7 @@ func TestDetachOnEnrichesCommand(t *testing.T) {
 }
 
 func TestIntoBuildsOnce(t *testing.T) {
-	d := NewDaemon().FromCobra(newInner())
+	d := New[any]().FromCobra(newInner())
 	if a, b := d.DetachOn(nil), d.DetachOn(nil); a != b {
 		t.Error("Into should return the same command on repeated calls")
 	}
@@ -142,7 +142,7 @@ func TestBuildPanicsWithoutCommand(t *testing.T) {
 			t.Error("build with nil command should panic")
 		}
 	}()
-	NewDaemon().FromCobra(nil).DetachOn(nil)
+	New[any]().FromCobra(nil).DetachOn(nil)
 }
 
 // isolateCache points os.UserCacheDir at a temp dir for the test.

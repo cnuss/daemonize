@@ -4,29 +4,34 @@
 // daemon manages backgrounding, a pid file, log streaming during startup and
 // shutdown, and signal-based readiness, all without mutating the command.
 //
-// The package is split across several files for navigability — they all
-// belong to the same `daemonize` package:
+// The package is split into three pieces:
 //
-//   - api.go        — public Daemon[T] interface and StatusResult.
-//   - impl.go       — DaemonImpl[T] struct and the With* / DetachOn builders.
-//   - cobra.go      — buildCobra wires lifecycle subcommands onto the
-//     caller's *cobra.Command.
-//   - start.go      — start subcommand: fork + exec the detached child,
-//     stream its startup log.
-//   - lifecycle.go  — Stop / Status / Reload runtime methods.
-//   - accessors.go  — IsAlive / PIDFile / LogFile / Name / PID / writePID.
-//   - util.go       — shared helpers (state-file paths, env-var derivation,
-//     log tailing).
+//   - daemonize (this package) — thin façade exposing NewDaemon and
+//     FromCobra. Stable surface for application code.
+//   - github.com/cnuss/daemonize/v1 — the stable Daemon[T] interface and
+//     StatusResult type. Application code that wants to declare types
+//     against the interface imports this.
+//   - github.com/cnuss/daemonize/v1alpha1 — the current implementation.
+//     Internals (DaemonImpl, helpers, cobra wiring) may change between
+//     alpha revisions; pin only if you need direct access to the struct.
 package daemonize
 
-import "time"
-
-const (
-	// stopPollEach is how often Stop checks whether the child has exited.
-	stopPollEach = 100 * time.Millisecond
-
-	// defaultGroupID is the cobra group ID for the lifecycle subcommands;
-	// defaultGroupName is its title (a ":" is appended on render).
-	defaultGroupID   = "daemonize"
-	defaultGroupName = "Daemon Commands"
+import (
+	"github.com/cnuss/daemonize/v1"
+	"github.com/cnuss/daemonize/v1alpha1"
+	"github.com/spf13/cobra"
 )
+
+// NewDaemon returns an unconfigured builder. Call FromCobra to wrap a command.
+func NewDaemon() v1.Daemon[any] {
+	return v1alpha1.New[any]()
+}
+
+// FromCobra is a shorthand for NewDaemon().FromCobra(command). Use it when you
+// already know you are wrapping a cobra command and don't need the untyped
+// Daemon[any] bootstrap:
+//
+//	cmd := daemonize.FromCobra(serve).WithReload(syscall.SIGHUP).DetachOn(ready)
+func FromCobra(command *cobra.Command) v1.Daemon[*cobra.Command] {
+	return NewDaemon().FromCobra(command)
+}

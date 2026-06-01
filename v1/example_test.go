@@ -1,4 +1,4 @@
-package daemonize_test
+package v1_test
 
 import (
 	"syscall"
@@ -40,7 +40,7 @@ func ExampleNewDaemon() {
 
 // WithReload enables the "reload" subcommand and sets the signal it sends to
 // the running process. The wrapped command must listen for that signal.
-func ExampleDaemon_WithReload() {
+func Example_withReload() {
 	ready := make(chan struct{})
 	serve := &cobra.Command{Use: "serve"}
 
@@ -53,7 +53,7 @@ func ExampleDaemon_WithReload() {
 // WithName overrides the base name used for the pid and log files. By default
 // it is derived from the wrapped command's path (e.g. "server-serve");
 // WithName("widget") yields widget.pid and widget.log instead.
-func ExampleDaemon_WithName() {
+func Example_withName() {
 	ready := make(chan struct{})
 	serve := &cobra.Command{Use: "serve"}
 
@@ -65,7 +65,7 @@ func ExampleDaemon_WithName() {
 
 // WithGroup sets the lifecycle help-group title. The lifecycle subcommands
 // (start/stop/status/reload) appear under "Lifecycle:" in --help output.
-func ExampleDaemon_WithGroup() {
+func Example_withGroup() {
 	ready := make(chan struct{})
 	serve := &cobra.Command{Use: "serve"}
 
@@ -78,7 +78,7 @@ func ExampleDaemon_WithGroup() {
 
 // Passing nil to WithGroup ungroups the lifecycle subcommands; they appear
 // under "Additional Commands" rather than their own labelled section.
-func ExampleDaemon_WithGroup_ungrouped() {
+func Example_withGroupUngrouped() {
 	ready := make(chan struct{})
 	serve := &cobra.Command{Use: "serve"}
 
@@ -93,7 +93,7 @@ func ExampleDaemon_WithGroup_ungrouped() {
 // the startup-log stream and reporting "started" to the user. Pass nil if the
 // wrapped command has no readiness signal (start gives the child ~100ms to
 // crash, then declares success).
-func ExampleDaemon_DetachOn() {
+func Example_detachOn() {
 	ready := make(chan struct{})
 	serve := &cobra.Command{
 		Use: "serve",

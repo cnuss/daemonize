@@ -1,4 +1,4 @@
-package daemonize
+package v1alpha1
 
 import (
 	"io"
