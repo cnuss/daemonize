@@ -44,10 +44,19 @@ func (d *DaemonImpl[T]) start(extra []string) error {
 	defer signal.Stop(sigCh)
 
 	if err := cmd.Start(); err != nil {
-		logf.Close()
+		// Parent's fd; the child never inherited it because exec failed.
+		// Returning the original Start error is the useful signal; close
+		// errors here are noise.
+		_ = logf.Close()
 		return err
 	}
-	logf.Close() // the child holds its own stdout/stderr fds
+	// The child holds its own stdout/stderr fds via fork+exec inheritance.
+	// Closing the parent's handle is best-effort cleanup; a failure here
+	// doesn't break the child, so surface it on stderr rather than aborting
+	// a successful start.
+	if err := logf.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "daemonize: close log file: %v\n", err)
+	}
 
 	pid := cmd.Process.Pid
 	if err := d.writePID(pid); err != nil {
