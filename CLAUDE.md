@@ -105,13 +105,21 @@ memory.
 
 ## Branch / PR flow
 
+**Every change starts with an issue.** No exceptions, including
+retroactive cleanups — if you're refactoring something I noticed
+mid-session, open the issue first, *then* the branch + PR. The PR
+body always carries a `Closes #<n>` line so the merge auto-closes
+the tracking issue and leaves a paper trail for future agents
+reading `git log` or `gh issue list`.
+
 Spelled out in [CONTRIBUTING.md](./CONTRIBUTING.md). One-liner:
 
 ```sh
-git switch -c <type>/<topic>
+gh issue create --title "…" --body "…"              # 1. issue first
+git switch -c <type>/<topic>                        # 2. branch
 # ... edits, commit ...
 git push -u origin <type>/<topic>
-gh pr create --title "<type>: …" --body "Closes #<n>. …"
+gh pr create --title "<type>: …" --body "Closes #<n>. …"  # 3. PR refs the issue
 # CI green ⇒
 gh pr merge <pr#> --squash --delete-branch
 ```
