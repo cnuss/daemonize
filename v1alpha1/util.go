@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -78,5 +80,46 @@ func (t *logTail) copy() {
 func (t *logTail) Close() {
 	if t.f != nil {
 		t.f.Close()
+	}
+}
+
+// startResult is the outcome of waiting for a child to become ready.
+type startResult int
+
+const (
+	startReady       startResult = iota // child signaled SIGUSR1
+	startFailed                         // child exited during startup
+	startInterrupted                    // SIGINT/SIGTERM received (Ctrl+C)
+)
+
+// streamUntilReady echoes the child's log file to stdout until the child sends
+// SIGUSR1 (ready), dies, or the parent is interrupted (SIGINT/SIGTERM).
+func (d *DaemonImpl[T]) streamUntilReady(sigCh chan os.Signal, pid int) startResult {
+	tail := d.openLog(false) // from the start of the file: show all startup output
+	defer tail.Close()
+
+	for {
+		tail.copy()
+		select {
+		case s := <-sigCh:
+			switch s {
+			case syscall.SIGUSR1:
+				tail.copy() // drain remaining startup output
+				return startReady
+			case syscall.SIGINT, syscall.SIGTERM:
+				return startInterrupted
+			case syscall.SIGCHLD:
+				// Reap without blocking. A zombie still answers kill(pid,0), so
+				// kill(pid,0) can't tell death from stop; Wait4 confirms exit.
+				var ws syscall.WaitStatus
+				if wpid, _ := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil); wpid == pid {
+					tail.copy()
+					return startFailed
+				}
+				// Stopped/continued or an unrelated child: keep waiting.
+			}
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 }

@@ -41,7 +41,8 @@ Deep-link by filename; line numbers will drift.
 | Implementation struct + `New[T]` constructor         | [`v1alpha1/impl.go`](./v1alpha1/impl.go)                           |
 | Builder methods (`FromCobra`, `DetachOn`, `With*`)   | [`v1alpha1/builder.go`](./v1alpha1/builder.go)                     |
 | Cobra wiring (`buildCobra`, `ensurePid`, `--output`) | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
-| `start` subcommand (fork + exec, `streamUntilReady`) | [`v1alpha1/start.go`](./v1alpha1/start.go)                         |
+| `start` subcommand (fork + exec, `startCobra`)       | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
+| `streamUntilReady` + `startResult` enum              | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
 | `Stop` / `Status` / `Reload`, `computeStatus`        | [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go)                 |
 | `IsAlive` / `PIDFile` / `LogFile` / `Name` / `PID`   | [`v1alpha1/accessors.go`](./v1alpha1/accessors.go)                 |
 | State files, env-var derivation, log tail            | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
@@ -78,7 +79,7 @@ memory.
   Ctrl+C and explicitly `SIGTERM`s the child (see `Stop` in
   [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go) and the
   start-interrupt branch in
-  [`v1alpha1/start.go`](./v1alpha1/start.go)).
+  [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)).
 - **Positional args need an explicit `Args` validator.** Once
   start/stop/status are attached as children of the wrapped command,
   cobra rejects unknown positionals as missing subcommands. The
@@ -104,13 +105,21 @@ memory.
 
 ## Branch / PR flow
 
+**Every change starts with an issue.** No exceptions, including
+retroactive cleanups — if you're refactoring something I noticed
+mid-session, open the issue first, *then* the branch + PR. The PR
+body always carries a `Closes #<n>` line so the merge auto-closes
+the tracking issue and leaves a paper trail for future agents
+reading `git log` or `gh issue list`.
+
 Spelled out in [CONTRIBUTING.md](./CONTRIBUTING.md). One-liner:
 
 ```sh
-git switch -c <type>/<topic>
+gh issue create --title "…" --body "…"              # 1. issue first
+git switch -c <type>/<topic>                        # 2. branch
 # ... edits, commit ...
 git push -u origin <type>/<topic>
-gh pr create --title "<type>: …" --body "Closes #<n>. …"
+gh pr create --title "<type>: …" --body "Closes #<n>. …"  # 3. PR refs the issue
 # CI green ⇒
 gh pr merge <pr#> --squash --delete-branch
 ```

@@ -5,8 +5,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-
-	"github.com/spf13/cobra"
 )
 
 // New returns an unconfigured DaemonImpl. The root `daemonize.NewDaemon`
@@ -46,10 +44,6 @@ type DaemonImpl[T any] struct {
 	pidFile string
 	logFile string
 	base    string
-
-	// daemonCmd is the daemon-owned foreground command; start re-execs along its
-	// full path so the daemon root can be mounted under a larger cobra tree.
-	daemonCmd *cobra.Command
 
 	// Into builds once; subsequent calls return the cached result.
 	builtOnce sync.Once
