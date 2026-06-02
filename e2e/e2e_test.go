@@ -6,9 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -24,6 +24,9 @@ type runner struct {
 func newRunner(t *testing.T, name string) *runner {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), name)
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", bin, "../examples/"+name).CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", name, err, out)
 	}
@@ -44,18 +47,33 @@ func (r *runner) run(t *testing.T, args ...string) string {
 
 func (r *runner) execRaw(args ...string) string {
 	c := exec.Command(r.bin, args...)
-	c.Env = append(os.Environ(), "HOME="+r.home, "XDG_CACHE_HOME="+r.home)
+	// HOME drives os.UserCacheDir on darwin; XDG_CACHE_HOME on linux/*bsd;
+	// LOCALAPPDATA on windows. Setting all three keeps every test isolated
+	// regardless of the runner OS.
+	c.Env = append(os.Environ(),
+		"HOME="+r.home,
+		"XDG_CACHE_HOME="+r.home,
+		"LOCALAPPDATA="+r.home,
+	)
 	out, _ := c.CombinedOutput()
 	return string(out)
 }
 
-// runInterrupt starts the example asynchronously, sends SIGINT at each of the
-// given offsets (measured from launch), then waits for it to exit and returns
-// the combined output. Used to exercise Ctrl+C escalation paths.
+// runInterrupt starts the example asynchronously, sends a Ctrl+C signal at
+// each of the given offsets (measured from launch), then waits for it to
+// exit and returns the combined output. configureInterruptable + sendInterrupt
+// are platform-specific shims (see interrupt_unix.go / interrupt_windows.go)
+// that pick the right OS primitive — POSIX SIGINT on Unix,
+// GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT) on Windows.
 func (r *runner) runInterrupt(t *testing.T, args []string, sendAt ...time.Duration) string {
 	t.Helper()
 	c := exec.Command(r.bin, args...)
-	c.Env = append(os.Environ(), "HOME="+r.home, "XDG_CACHE_HOME="+r.home)
+	configureInterruptable(c)
+	c.Env = append(os.Environ(),
+		"HOME="+r.home,
+		"XDG_CACHE_HOME="+r.home,
+		"LOCALAPPDATA="+r.home,
+	)
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
@@ -67,7 +85,7 @@ func (r *runner) runInterrupt(t *testing.T, args []string, sendAt ...time.Durati
 		if d := time.Until(started.Add(when)); d > 0 {
 			time.Sleep(d)
 		}
-		_ = c.Process.Signal(syscall.SIGINT)
+		_ = sendInterrupt(c.Process)
 	}
 	_ = c.Wait()
 	out := buf.String()
@@ -91,11 +109,14 @@ func rejects(t *testing.T, out, sub string) {
 	}
 }
 
-// reloadExamples support the full lifecycle including reload.
-var reloadExamples = []string{"reload", "named", "grouped", "ungrouped"}
+// lifecycleExamples drive start/status/stop end-to-end across the
+// representative example binaries. All three use WithShutdownSignal +
+// <-cmd.Context().Done() so the worker's "stopping" line lands on both
+// Unix (SIGTERM) and Windows (named-pipe shutdown signal).
+var lifecycleExamples = []string{"named", "grouped", "ungrouped"}
 
 func TestLifecycle(t *testing.T) {
-	for _, name := range reloadExamples {
+	for _, name := range lifecycleExamples {
 		t.Run(name, func(t *testing.T) {
 			r := newRunner(t, name)
 
@@ -103,7 +124,6 @@ func TestLifecycle(t *testing.T) {
 			wants(t, start, "ready: hi", "started") // -m flag forwarded to the child
 
 			wants(t, r.run(t, "status"), "running")
-			wants(t, r.run(t, "reload"), "reload signal sent")
 
 			stop := r.run(t, "stop")
 			wants(t, stop, "stopping", "stopped") // worker line (streamed) + daemon line
@@ -113,18 +133,25 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+func TestSlowShutdownStreams(t *testing.T) {
+	r := newRunner(t, "slow-shutdown")
+	wants(t, r.run(t, "start", "--step", "10ms"), "started")
+	out := r.run(t, "stop")
+	wants(t, out, "shutdown [1/3]", "shutdown [3/3]", "stopped cleanly")
+}
+
+func TestShutdownError(t *testing.T) {
+	r := newRunner(t, "shutdown-error")
+	wants(t, r.run(t, "start"), "started")
+	out := r.run(t, "stop")
+	wants(t, out, "shutdown error", "stopped") // failure streamed, but still stops
+	wants(t, r.run(t, "status"), "not running")
+}
+
 func TestStopIdempotent(t *testing.T) {
 	r := newRunner(t, "hello")
 	// stop when never started: no error, exit 0 path prints "not running".
 	wants(t, r.run(t, "stop"), "not running")
-}
-
-func TestHelloHasNoReload(t *testing.T) {
-	r := newRunner(t, "hello")
-	// hello didn't call WithReload, so the reload subcommand should not be
-	// attached. (Invoking `reload` would now be a positional under the
-	// default ArbitraryArgs validator, so we check the help output instead.)
-	rejects(t, r.run(t, "--help"), "reload")
 }
 
 func TestNamedStateFile(t *testing.T) {
@@ -148,13 +175,6 @@ func TestSlowStartStreams(t *testing.T) {
 	wants(t, out, "startup [1/3]", "startup [3/3]", "ready", "started")
 }
 
-func TestSlowShutdownStreams(t *testing.T) {
-	r := newRunner(t, "slow-shutdown")
-	wants(t, r.run(t, "start", "--step", "10ms"), "started")
-	out := r.run(t, "stop")
-	wants(t, out, "shutdown [1/3]", "shutdown [3/3]", "stopped cleanly")
-}
-
 func TestWithArgs(t *testing.T) {
 	r := newRunner(t, "with-args")
 	out := r.run(t, "start", "--port", "9000", "-v", "alpha", "beta")
@@ -170,8 +190,9 @@ func TestSubcommand(t *testing.T) {
 	wants(t, r.run(t, "delete"), "deleted")
 
 	// The "run" subtree is the daemonized one (mounted under the app root).
-	// The worker has no signal handling: stop relies on SIGTERM's default kill,
-	// so there's no "stopping" line.
+	// The worker has no signal handling: stop relies on the OS-level
+	// terminate (SIGTERM default kill on Unix; TerminateProcess on Windows),
+	// so there is no "stopping" line from the worker side.
 	wants(t, r.run(t, "run", "start"), "started")
 	wants(t, r.run(t, "run", "status"), "running")
 	wants(t, r.run(t, "run", "stop"), "stopped")
@@ -183,14 +204,6 @@ func TestStartError(t *testing.T) {
 	out := r.run(t, "start")
 	wants(t, out, "exited during startup")      // daemon detected the failed child
 	wants(t, r.run(t, "status"), "not running") // nothing left behind
-}
-
-func TestShutdownError(t *testing.T) {
-	r := newRunner(t, "shutdown-error")
-	wants(t, r.run(t, "start"), "started")
-	out := r.run(t, "stop")
-	wants(t, out, "shutdown error", "stopped") // failure streamed, but still stops
-	wants(t, r.run(t, "status"), "not running")
 }
 
 func TestPidCleanup(t *testing.T) {
@@ -220,43 +233,6 @@ func TestPidCleanup(t *testing.T) {
 	if !strings.Contains(string(contents), "hello world") {
 		t.Errorf("log file %s missing \"hello world\":\n%s", logPath, contents)
 	}
-}
-
-func TestStartInterruptGraceful(t *testing.T) {
-	r := newRunner(t, "slow-start")
-
-	// Single Ctrl+C while start is still streaming startup output sends SIGTERM
-	// to the child; the slow-start worker's signal handler picks that up,
-	// prints "stopping", and exits cleanly. No SIGKILL escalation needed.
-	out := r.runInterrupt(t, []string{"start", "--step", "200ms"}, 300*time.Millisecond)
-	wants(t, out, "startup interrupted", "startup cancelled")
-	rejects(t, out, "forcing kill")
-	wants(t, r.run(t, "status"), "not running")
-}
-
-func TestStartInterruptEscalates(t *testing.T) {
-	r := newRunner(t, "stubborn")
-
-	// stubborn ignores SIGTERM; the first Ctrl+C during start triggers SIGTERM
-	// (which the worker drops), and a second Ctrl+C escalates to SIGKILL.
-	// stubborn delays close(ready) by ~2s to keep the parent in
-	// streamUntilReady long enough for both interrupts to land mid-stream.
-	out := r.runInterrupt(t, []string{"start"},
-		400*time.Millisecond, 900*time.Millisecond)
-	wants(t, out, "startup interrupted", "forcing kill", "startup cancelled")
-	wants(t, r.run(t, "status"), "not running")
-}
-
-func TestStopInterruptEscalates(t *testing.T) {
-	r := newRunner(t, "stubborn")
-
-	wants(t, r.run(t, "start"), "ready", "started")
-
-	// stop sends SIGTERM and waits forever; stubborn ignores it. A single
-	// Ctrl+C during the wait escalates to SIGKILL and reports the kill.
-	out := r.runInterrupt(t, []string{"stop"}, 300*time.Millisecond)
-	wants(t, out, "shutting down", "killed", "on interrupt")
-	wants(t, r.run(t, "status"), "not running")
 }
 
 func TestStatusShowsLogFile(t *testing.T) {
@@ -303,26 +279,65 @@ func TestStatusJSONNotRunning(t *testing.T) {
 	}
 }
 
+func TestStartInterruptGraceful(t *testing.T) {
+	r := newRunner(t, "slow-start")
+
+	// Single Ctrl+C while start is still streaming startup output sends the
+	// child a graceful-shutdown signal — SIGTERM on Unix, the named-pipe
+	// byte on Windows (delivered because slow-start uses WithShutdownSignal).
+	// The worker prints "stopping" and exits cleanly; no escalation step.
+	out := r.runInterrupt(t, []string{"start", "--step", "200ms"}, 300*time.Millisecond)
+	wants(t, out, "startup interrupted", "startup cancelled")
+	rejects(t, out, "forcing kill")
+	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestStartInterruptEscalates(t *testing.T) {
+	r := newRunner(t, "stubborn")
+
+	// stubborn doesn't honor the graceful shutdown signal — on Unix it
+	// installs a no-op SIGTERM handler; on Windows it doesn't configure
+	// WithShutdownSignal so the pipe listener's cancel is a no-op. Either
+	// way the first Ctrl+C during start triggers the graceful path
+	// (ignored), and the second escalates to a hard kill. stubborn delays
+	// close(ready) by ~2s to keep the parent in streamUntilReady long
+	// enough for both interrupts to land mid-stream.
+	out := r.runInterrupt(t, []string{"start"},
+		400*time.Millisecond, 900*time.Millisecond)
+	wants(t, out, "startup interrupted", "forcing kill", "startup cancelled")
+	wants(t, r.run(t, "status"), "not running")
+}
+
+func TestStopInterruptEscalates(t *testing.T) {
+	r := newRunner(t, "stubborn")
+
+	wants(t, r.run(t, "start"), "ready", "started")
+
+	// stop signals the worker (SIGTERM on Unix, pipe byte on Windows) and
+	// waits forever; stubborn ignores both, so a single Ctrl+C in the stop
+	// console escalates to a hard kill and reports it.
+	out := r.runInterrupt(t, []string{"stop"}, 300*time.Millisecond)
+	wants(t, out, "shutting down", "killed", "on interrupt")
+	wants(t, r.run(t, "status"), "not running")
+}
+
 func TestStatusJSONStale(t *testing.T) {
 	r := newRunner(t, "hello")
 	wants(t, r.run(t, "start", "-m", "world"), "started")
 
 	// Pull the worker's pid out of the status text, then kill it out-of-band
-	// so the pid file is left stale.
+	// so the pid file is left stale. killPID + waitForExit are
+	// platform-specific shims (Unix: syscall.Kill + signal-0 probe;
+	// Windows: os.Process.Kill / OpenProcess + WaitForSingleObject).
 	pidStr := between(r.run(t, "status"), "running (pid ", ")")
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		t.Fatalf("parse pid from status: %v", err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	if err := killPID(pid); err != nil {
 		t.Fatalf("kill %d: %v", pid, err)
 	}
-	for i := 0; i < 100; i++ {
-		if syscall.Kill(pid, 0) != nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForExit(pid)
 
 	out := r.run(t, "status", "-o", "json")
 	var s map[string]any

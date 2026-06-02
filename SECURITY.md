@@ -65,9 +65,17 @@ cosign verify-blob \
 
 ## Scope
 
-In-scope: anything in this repository's library code (`daemonize.go`,
-`example_test.go`) or its release artifacts.
+In-scope: anything in this repository's library code (the root
+`daemonize` façade, `v1/`, `v1alpha1/`) or its release artifacts.
 
-Out of scope: vulnerabilities in `cobra` or the Go standard library itself
-(report those to their respective projects), and issues that require an
-attacker to already have local execution as the same user.
+Out of scope: vulnerabilities in `cobra` or the Go standard library
+itself (report those to their respective projects), and issues that
+require an attacker to already have local execution as the same user.
+
+## Supported platforms
+
+Daemon lifecycle is exercised on Linux, macOS, and Windows. The Unix
+path uses POSIX signals; the Windows path uses `CreateProcess` with
+`DETACHED_PROCESS`, a ready-file sentinel, and a per-daemon named pipe
+for graceful shutdown. The side-by-side flow lives in
+[CLAUDE.md → Platform layer](./CLAUDE.md#platform-layer).

@@ -1,5 +1,5 @@
 // Command hello is the smallest daemonize example: wrap a worker, stream its
-// startup via a readiness channel, and get start/stop/status. No reload.
+// startup via a readiness channel, and get start/stop/status.
 package main
 
 import (

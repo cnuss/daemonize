@@ -1,12 +1,12 @@
-// Command stubborn is a misbehaving worker that catches SIGTERM and ignores
-// it — only SIGKILL stops it. Used by the e2e suite to exercise the Ctrl+C
-// escalation path in stop.
+// Command stubborn is a misbehaving worker that catches the graceful-shutdown
+// signal and ignores it — only a hard kill stops it (SIGKILL on Unix,
+// TerminateProcess on Windows). Used by the e2e suite to exercise the Ctrl+C
+// escalation path in start and stop.
 package main
 
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 	"time"
 
@@ -19,19 +19,8 @@ func main() {
 
 	cmd := &cobra.Command{
 		Use:   "stubborn",
-		Short: "Worker that ignores SIGTERM (only SIGKILL stops it)",
+		Short: "Worker that ignores the graceful-shutdown signal",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Install a no-op handler for SIGTERM before anything else so
-			// the default-action terminate is suppressed for the lifetime
-			// of the worker. Only SIGKILL ends the process.
-			ignore := make(chan os.Signal, 1)
-			signal.Notify(ignore, syscall.SIGTERM)
-			go func() {
-				for range ignore {
-					fmt.Println("ignored SIGTERM")
-				}
-			}()
-
 			// Slow startup window — gives "start" callers a chance to
 			// exercise the interrupt path before readiness fires.
 			fmt.Println("warming up...")
@@ -40,12 +29,20 @@ func main() {
 			fmt.Println("ready")
 			close(ready)
 
-			<-time.After(time.Hour) // killed by SIGKILL long before this fires
+			// WithShutdownSignal below installs a signal.NotifyContext on
+			// Unix and a named-pipe listener on Windows. Both cancel
+			// cmd.Context() when the parent signals a graceful stop. We
+			// deliberately ignore the cancellation here so the parent's
+			// stop / killChildOnInterrupt has to escalate to a hard kill.
+			<-time.After(time.Hour) // never fires; OS-level kill ends us
 			return nil
 		},
 	}
 
-	if err := daemonize.FromCobra(cmd).DetachOn(ready).Execute(); err != nil {
+	d := daemonize.FromCobra(cmd).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
+		DetachOn(ready)
+	if err := d.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

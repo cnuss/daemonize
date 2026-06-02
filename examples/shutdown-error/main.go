@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 
 	"github.com/cnuss/daemonize"
@@ -22,9 +21,7 @@ func main() {
 			fmt.Println("ready")
 			close(ready)
 
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			<-stop
+			<-cmd.Context().Done()
 
 			fmt.Println("shutdown error: failed to flush pending writes")
 			return fmt.Errorf("shutdown failed")
@@ -33,6 +30,7 @@ func main() {
 
 	cmd := daemonize.NewDaemon().
 		FromCobra(serve).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
 		DetachOn(ready)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

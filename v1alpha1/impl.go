@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"sync"
-	"syscall"
 )
 
 // New returns an unconfigured DaemonImpl. The root `daemonize.NewDaemon`
@@ -19,7 +18,6 @@ func New[T any]() *DaemonImpl[T] {
 type DaemonImpl[T any] struct {
 	inner     T
 	detachSig *(<-chan struct{}) // nil = unset
-	reloadSig *syscall.Signal    // nil = reload disabled
 	name      *string            // nil = derive from command path
 	group     *string            // group title; nil (with groupSet) = ungrouped
 	groupSet  bool               // true once WithGroup was called
@@ -48,4 +46,10 @@ type DaemonImpl[T any] struct {
 	// Into builds once; subsequent calls return the cached result.
 	builtOnce sync.Once
 	built     T
+
+	// platform is the OS-specific shim that startCobra, streamUntilReady,
+	// Stop, Reload, IsAlive, and notifyParentReady route through. It is
+	// constructed once during buildCobra, after the state-file paths
+	// (pidFile, logFile, base) have been resolved.
+	platform platform
 }

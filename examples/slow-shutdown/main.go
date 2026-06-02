@@ -1,7 +1,7 @@
 // Command slow-shutdown demonstrates a wrapped command with a slow, graceful
-// shutdown. Startup is instant; on SIGTERM the command runs several drain steps
-// before exiting, and the daemon streams them to the terminal while "stop"
-// waits (indefinitely, unless Ctrl+C escalates to SIGKILL).
+// shutdown. Startup is instant; on shutdown the command runs several drain
+// steps before exiting, and the daemon streams them to the terminal while
+// "stop" waits (indefinitely, unless Ctrl+C escalates to a hard kill).
 //
 // The --step delay is set at start (forwarded to the worker); stop just signals
 // it. Try: go run . start --step 500ms, then in another shell: go run . stop
@@ -10,7 +10,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 	"time"
 
@@ -29,9 +28,7 @@ func main() {
 			fmt.Println("ready")
 			close(ready)
 
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			<-stop
+			<-cmd.Context().Done()
 
 			steps := []string{"draining requests", "flushing buffers", "closing connections"}
 			for i, s := range steps {
@@ -46,6 +43,7 @@ func main() {
 
 	cmd := daemonize.NewDaemon().
 		FromCobra(serve).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
 		DetachOn(ready)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 
 	"github.com/cnuss/daemonize"
@@ -20,20 +19,9 @@ func serve(ready chan struct{}) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("ready: %s\n", message)
 			close(ready)
-
-			hup := make(chan os.Signal, 1)
-			signal.Notify(hup, syscall.SIGHUP)
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			for {
-				select {
-				case <-hup:
-					fmt.Println("reloaded")
-				case <-stop:
-					fmt.Println("stopping")
-					return nil
-				}
-			}
+			<-cmd.Context().Done()
+			fmt.Println("stopping")
+			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "hello", "message printed when ready")
@@ -45,8 +33,8 @@ func main() {
 	group := "Lifecycle"
 	cmd := daemonize.NewDaemon().
 		FromCobra(serve(ready)).
-		WithReload(syscall.SIGHUP).
 		WithGroup(&group).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
 		DetachOn(ready)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

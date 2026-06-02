@@ -8,17 +8,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
 // buildCobra enriches the caller's command in place with start/stop/status
-// (and optionally reload) as subcommands, wrapping its RunE so that running
-// the command directly in the foreground still owns the pid file and relays
-// readiness — making stop/reload/status work against both foreground and
-// daemonized runs.
+// as subcommands, wrapping its RunE so that running the command directly in
+// the foreground still owns the pid file and relays readiness — making
+// stop/status work against both foreground and daemonized runs.
 //
 // "start" re-execs this binary as a detached child running the wrapped
 // command (forwarding its flags), writing the child PID to the pid file.
@@ -76,6 +74,7 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	}
 	d.base = base
 	d.pidFile, d.logFile = stateFiles(serveName, base)
+	d.platform = newPlatform(d.pidFile, d.logFile)
 
 	// Wrap PreRunE: gate foreground runs the same way "start" is gated, so
 	// running the command directly while a daemon is alive fails fast instead
@@ -113,7 +112,21 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 			go func() {
 				<-detachSig
 				if os.Getenv(daemonEnvFor(d.base)) != "" {
-					syscall.Kill(os.Getppid(), syscall.SIGUSR1)
+					// Install the shutdown listener BEFORE notifying the
+					// parent so the parent's Stop never races a not-yet-
+					// listening child. Pass nil when the caller did not wire
+					// real shutdown signals: ctxCancel is the default no-op
+					// in that case, and installing a listener with a no-op
+					// cancel would let Stop write the named-pipe byte and
+					// then hang polling for a child that has no plan to
+					// exit. Skipping the listener forces Stop to fall
+					// through to TerminateProcess on Windows.
+					var cancel context.CancelFunc
+					if d.shutdownSigsSet && len(d.shutdownSigs) > 0 {
+						cancel = d.ctxCancel
+					}
+					d.platform.installShutdownListener(cancel)
+					d.notifyParentReady()
 				}
 			}()
 		}
@@ -188,23 +201,11 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	})
 
 	command.AddCommand(startCmd, stopCmd, statusCmd)
-
-	// reload is registered only when a signal was configured via WithReload.
-	if d.reloadSig != nil {
-		sig := *d.reloadSig
-		command.AddCommand(&cobra.Command{
-			Use:     "reload",
-			Short:   fmt.Sprintf("Signal the running `%s` to reload (%s)", serveName, sig),
-			GroupID: groupID,
-			PreRunE: d.ensurePid(true),
-			RunE:    func(cmd *cobra.Command, args []string) error { return d.Reload() },
-		})
-	}
 	return command
 }
 
 // ensurePid returns a PreRunE that gates on the daemon's running state:
-// mustRun=true requires a live process (stop, reload); mustRun=false requires
+// mustRun=true requires a live process (stop); mustRun=false requires
 // none (start, and the bare alias). A stale pid file counts as not running.
 func (d *DaemonImpl[T]) ensurePid(mustRun bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
@@ -249,62 +250,95 @@ func (s *statusOutputFormat) Set(v string) error {
 	}
 }
 
+// startResult is the outcome of waiting for a child to become ready. Both
+// platforms produce the same three states from streamUntilReady; the
+// reactions to each state stay in the cross-platform startCobra below.
+type startResult int
+
+const (
+	startReady       startResult = iota // child signaled readiness (Unix: SIGUSR1; Windows: ready file)
+	startFailed                         // child exited during startup
+	startInterrupted                    // user interrupted the parent (Unix: SIGINT/SIGTERM; Windows: os.Interrupt)
+)
+
+// platform is the per-OS shim that startCobra, streamUntilReady, IsAlive,
+// and Stop route through. unixPlatform lives in platform.go;
+// windowsPlatform in platform_windows.go. newPlatform (also per-OS) builds
+// the right impl during buildCobra once the state-file paths are known.
+type platform interface {
+	// applyDetachAttrs sets cmd.SysProcAttr so the child survives parent
+	// exit. Unix uses Setsid; Windows uses DETACHED_PROCESS +
+	// CREATE_NEW_PROCESS_GROUP.
+	applyDetachAttrs(cmd *exec.Cmd)
+	// installStartSignals subscribes the parent to the signals it needs
+	// during the startup window. The returned func releases the
+	// subscription.
+	installStartSignals() (chan os.Signal, func())
+	// waitForEarlyExit gives the child ~100ms to crash before declaring
+	// success on the no-readiness path; returns an error if the child died.
+	waitForEarlyExit(sigCh chan os.Signal, pid int, serveName string) error
+	// killChildOnInterrupt handles the startInterrupted branch of
+	// streamUntilReady — kill the child according to the platform's rules.
+	killChildOnInterrupt(cmd *exec.Cmd, sigCh chan os.Signal, pid int, serveName string)
+	// afterStartupReady runs on the success path of startCobra; on Windows
+	// it removes the ready-file sentinel.
+	afterStartupReady()
+	// pollStartupState is the per-tick check inside streamUntilReady: did
+	// the child signal ready, die, or did the user interrupt? Returns
+	// (state, true) when there is a decision; (_, false) to keep polling.
+	pollStartupState(sigCh chan os.Signal, pid int) (startResult, bool)
+	// isAlive reports whether the given pid is currently running.
+	isAlive(pid int) bool
+	// notifyParentReady runs inside the daemon child once the wrapped
+	// command closes its readiness channel.
+	notifyParentReady(ppid int)
+	// installShutdownListener runs in the daemon child after notifyParentReady.
+	// On Windows it opens a server-side named pipe that the parent's Stop
+	// writes to, calling cancel when the byte arrives — that surfaces as
+	// <-cmd.Context().Done() to the worker (assuming WithShutdownSignal /
+	// WithContext was configured). On Unix it is a no-op because POSIX
+	// signals already wake the worker's context.
+	installShutdownListener(cancel context.CancelFunc)
+	// stop terminates pid. tickTail is called once per polling iteration so
+	// callers can interleave log streaming with the kill+wait loop.
+	stop(pid int, tickTail func()) error
+}
+
 // startCobra runs the "start" subcommand: it re-execs this binary as a
 // detached child along the wrapped command's path (so a daemon root mounted
 // under a larger cobra tree still resolves correctly), writes the child's
-// pid file, then either waits for the readiness signal (channel + SIGUSR1)
-// or gives the child a brief window to crash before declaring success.
+// pid file, then either waits for the readiness signal or gives the child a
+// brief window to crash before declaring success.
 //
-// daemonCmd is the wrapped command (the start subcommand's Parent()), passed
+// The body stays cross-platform by routing every OS-touching step through a
+// dispatcher method. platform.go (!windows) and platform_windows.go each
+// implement the same set:
+//
+//	applyDetachAttrs        — set SysProcAttr for the detach mode
+//	installStartSignals     — install the parent-side signal channel
+//	waitForEarlyExit        — sleep ~100ms; return an error if the child died
+//	killChildOnInterrupt    — handle the streamUntilReady startInterrupted branch
+//	afterStartupReady       — post-ready cleanup (Windows removes the sentinel)
+//	streamUntilReady        — block until ready / failed / interrupted
+//
+// daemonCmd is the wrapped command (the "start" subcommand's Parent()), passed
 // at call time so DaemonImpl doesn't have to hold a *cobra.Command field.
 // extra is the user's tail of argv (flags + positionals) forwarded to the
 // re-exec'd child verbatim.
 func (d *DaemonImpl[T]) startCobra(daemonCmd *cobra.Command, extra []string) error {
-	exe, err := os.Executable()
+	cmd, logf, serveName, err := d.prepareStart(daemonCmd, extra)
 	if err != nil {
 		return err
 	}
+	d.platform.applyDetachAttrs(cmd)
 
-	// Fresh log file per run so we stream only this child's output.
-	logf, err := os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
+	sigCh, stopSignals := d.platform.installStartSignals()
+	defer stopSignals()
 
-	// Re-exec along the wrapped command's full path (minus the binary), so the
-	// daemon root can be mounted under a larger cobra tree (e.g. "foo run serve").
-	subPath := strings.Fields(daemonCmd.CommandPath())
-	if len(subPath) > 0 {
-		subPath = subPath[1:]
-	}
-	serveName := daemonCmd.Name()
-
-	cmd := exec.Command(exe, append(subPath, extra...)...)
-	cmd.Stdout = logf
-	cmd.Stderr = logf
-	cmd.Env = append(os.Environ(), daemonEnvFor(d.base)+"=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // own session; survives parent exit
-
-	// Install handlers before starting the child so we cannot miss SIGUSR1
-	// (child ready) or SIGCHLD (child died) fired right after exec. SIGINT/SIGTERM
-	// let Ctrl+C during the long startup cancel the launch.
-	sigCh := make(chan os.Signal, 4)
-	signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGCHLD, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	if err := cmd.Start(); err != nil {
-		// Parent's fd; the child never inherited it because exec failed.
-		// Returning the original Start error is the useful signal; close
-		// errors here are noise.
-		_ = logf.Close()
-		return err
-	}
-	// The child holds its own stdout/stderr fds via fork+exec inheritance.
-	// Closing the parent's handle is best-effort cleanup; a failure here
-	// doesn't break the child, so surface it on stderr rather than aborting
-	// a successful start.
-	if err := logf.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "daemonize: close log file: %v\n", err)
+	startErr := cmd.Start()
+	d.closeStartedLog(logf, startErr)
+	if startErr != nil {
+		return startErr
 	}
 
 	pid := cmd.Process.Pid
@@ -312,24 +346,13 @@ func (d *DaemonImpl[T]) startCobra(daemonCmd *cobra.Command, extra []string) err
 		return err
 	}
 
-	// Without a readiness channel the daemon has no "I'm ready" signal to wait
-	// for, so just give the child ~100ms to crash before declaring success.
 	hasReadiness := d.detachSig != nil && *d.detachSig != nil
 	if !hasReadiness {
-		select {
-		case s := <-sigCh:
-			if s == syscall.SIGCHLD {
-				var ws syscall.WaitStatus
-				if wpid, _ := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil); wpid == pid {
-					os.Remove(d.pidFile)
-					return fmt.Errorf("%s exited during startup (see %s)", serveName, d.logFile)
-				}
-			}
-		case <-time.After(100 * time.Millisecond):
+		if err := d.platform.waitForEarlyExit(sigCh, pid, serveName); err != nil {
+			os.Remove(d.pidFile)
+			return err
 		}
-		fmt.Printf("pid file: %s\n", d.pidFile)
-		fmt.Printf("log file: %s\n", d.logFile)
-		fmt.Printf("started (pid %d), now running in the background\n", pid)
+		d.announceStarted(pid)
 		return nil
 	}
 
@@ -337,43 +360,80 @@ func (d *DaemonImpl[T]) startCobra(daemonCmd *cobra.Command, extra []string) err
 
 	switch d.streamUntilReady(sigCh, pid) {
 	case startInterrupted:
-		fmt.Printf("\nstartup interrupted; stopping %s (pid %d)...\n", serveName, pid)
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-
-		// Wait for the child to exit on SIGTERM. A second Ctrl+C (or SIGTERM
-		// to this process) escalates to SIGKILL; otherwise we wait
-		// indefinitely so the child can clean up on its own schedule.
-		done := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(done) }()
-	graceLoop:
-		for {
-			select {
-			case <-done:
-				break graceLoop
-			case s := <-sigCh:
-				if s == syscall.SIGINT || s == syscall.SIGTERM {
-					fmt.Printf("forcing kill (pid %d)\n", pid)
-					_ = syscall.Kill(pid, syscall.SIGKILL)
-					<-done
-					break graceLoop
-				}
-				// SIGCHLD and any other signal are noise here; cmd.Wait
-				// detects the actual exit via done.
-			}
-		}
-
+		d.platform.killChildOnInterrupt(cmd, sigCh, pid, serveName)
 		os.Remove(d.pidFile)
 		return fmt.Errorf("startup cancelled")
 	case startFailed:
-		_ = cmd.Wait() // reap the child that died during startup
+		_ = cmd.Wait()
 		os.Remove(d.pidFile)
 		return fmt.Errorf("%s exited during startup (see %s)", serveName, d.logFile)
 	}
 
-	// Child is up. Don't Wait: it outlives us via its own session, and the OS
-	// reparents it when this process exits.
-	fmt.Printf("pid file: %s\n", d.pidFile)
-	fmt.Printf("log file: %s\n", d.logFile)
-	fmt.Printf("started (pid %d), now running in the background\n", pid)
+	d.platform.afterStartupReady()
+	d.announceStarted(pid)
+	return nil
+}
+
+// streamUntilReady tails the child's log file and asks the platform once per
+// 50ms whether the startup has resolved.
+func (d *DaemonImpl[T]) streamUntilReady(sigCh chan os.Signal, pid int) startResult {
+	tail := d.openLog(false)
+	defer tail.Close()
+
+	for {
+		tail.copy()
+		if state, done := d.platform.pollStartupState(sigCh, pid); done {
+			tail.copy()
+			return state
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// IsAlive reports whether the process named by the pid file is running.
+func (d *DaemonImpl[T]) IsAlive() bool {
+	pid, err := d.PID()
+	if err != nil {
+		return false
+	}
+	return d.platform.isAlive(pid)
+}
+
+// notifyParentReady runs inside the daemon child once the wrapped command
+// closes its readiness channel; it delegates to the platform so the relay
+// path stays uniform across OSes.
+func (d *DaemonImpl[T]) notifyParentReady() {
+	d.platform.notifyParentReady(os.Getppid())
+}
+
+// Stop sends a termination signal to the running process and waits for it
+// to exit. The log is tailed throughout so the worker's shutdown output
+// reaches the user.
+func (d *DaemonImpl[T]) Stop() error {
+	if d.ctxCancel != nil {
+		defer d.ctxCancel()
+	}
+	pid, err := d.PID()
+	if err != nil {
+		fmt.Println("not running")
+		return nil
+	}
+	if !d.IsAlive() {
+		os.Remove(d.pidFile)
+		fmt.Printf("not running (cleared stale pid %d)\n", pid)
+		return nil
+	}
+	fmt.Printf("shutting down (pid %d)...\n", pid)
+
+	tail := d.openLog(true)
+	defer tail.Close()
+
+	if err := d.platform.stop(pid, tail.copy); err != nil {
+		return err
+	}
+
+	tail.copy()
+	os.Remove(d.pidFile)
+	fmt.Printf("stopped (pid %d)\n", pid)
 	return nil
 }

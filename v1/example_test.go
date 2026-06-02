@@ -1,8 +1,6 @@
 package v1_test
 
 import (
-	"syscall"
-
 	"github.com/cnuss/daemonize"
 	"github.com/spf13/cobra"
 )
@@ -35,18 +33,6 @@ func ExampleNewDaemon() {
 	serve := &cobra.Command{Use: "serve"}
 
 	root := daemonize.NewDaemon().FromCobra(serve).DetachOn(ready)
-	_ = root.Execute()
-}
-
-// WithReload enables the "reload" subcommand and sets the signal it sends to
-// the running process. The wrapped command must listen for that signal.
-func Example_withReload() {
-	ready := make(chan struct{})
-	serve := &cobra.Command{Use: "serve"}
-
-	root := daemonize.FromCobra(serve).
-		WithReload(syscall.SIGHUP).
-		DetachOn(ready)
 	_ = root.Execute()
 }
 

@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 `daemonize` wraps any [cobra](https://github.com/spf13/cobra) command with Unix
-daemon lifecycle controls — `start`, `stop`, `status`, `reload` — by re-execing
+daemon lifecycle controls — `start`, `stop`, `status` — by re-execing
 the binary as a detached background process. The wrapped command runs in the
 foreground; the daemon manages backgrounding, a pid file, log streaming during
 startup and shutdown, and signal-based readiness, all without mutating the
@@ -160,14 +160,27 @@ lifecycle subcommands and wraps `RunE` to own the pid file. Then:
 ./hello start -m there  # forward -m to the daemonized run
 ```
 
-Add `.WithReload(syscall.SIGHUP)` before `DetachOn` to register a `reload`
-subcommand that signals the running process.
+## Platforms
+
+- **Linux**, **macOS**, and other Unix-likes — start/stop/status work
+  through standard POSIX signals.
+- **Windows** — same surface, different primitives:
+  `CreateProcess(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)` for
+  detach, a `<base>.ready` sentinel file for the readiness handshake,
+  and a per-daemon named pipe (`\\.\pipe\daemonize-<base>`) for
+  graceful shutdown. Workers that want cross-platform graceful
+  shutdown must use `WithShutdownSignal` + `<-cmd.Context().Done()`
+  (raw `signal.Notify(stop, SIGTERM)` works on Unix but won't pick up
+  the Windows pipe signal).
+
+Side-by-side flow + the wire format for the named-pipe shutdown live
+in [CLAUDE.md → Platform layer](./CLAUDE.md#platform-layer).
 
 ## Features
 
 - **In-place enrichment**: `FromCobra(cmd).DetachOn(ready)` returns the same
-  `*cobra.Command`, now with `start`/`stop`/`status` (and optionally `reload`)
-  attached as subcommands. Running the command directly still invokes its
+  `*cobra.Command`, now with `start`/`stop`/`status` attached as
+  subcommands. Running the command directly still invokes its
   original `RunE` (the foreground worker); the wrapped `RunE` owns the pid
   file and relays readiness, so `stop`/`status` work against foreground runs
   too.
@@ -205,7 +218,6 @@ type Daemon[T any] interface {
     FromCobra(inner *cobra.Command) Daemon[*cobra.Command]
     DetachOn(detachSig <-chan struct{}) T  // terminal: builds and returns T
 
-    WithReload(sig syscall.Signal) Daemon[T] // enables the "reload" subcommand
     WithName(name string) Daemon[T]          // override state-file base name
     WithGroup(name *string) Daemon[T]        // help-group title (nil = ungroup)
     WithContext(parent context.Context) Daemon[T]    // parent ctx for the wrapped cmd; nil = opt out
@@ -214,7 +226,6 @@ type Daemon[T any] interface {
     // Runtime accessors / actions (usable without building the cobra tree)
     Stop() error
     Status() error
-    Reload() error
     PID() (int, error)
     IsAlive() bool
     PIDFile() (string, error)
@@ -233,7 +244,6 @@ Self-contained programs in [`./examples`](./examples):
 | Example          | Demonstrates                                                 |
 | ---------------- | ------------------------------------------------------------ |
 | `hello`          | Smallest wiring (`FromCobra` + `DetachOn`).                  |
-| `reload`         | `WithReload(SIGHUP)` and a worker that handles it.           |
 | `named`          | `WithName("widget")` for custom pid/log file names.          |
 | `grouped`        | `WithGroup(&"Lifecycle")` for a custom help-group title.     |
 | `ungrouped`      | `WithGroup(nil)` to put lifecycle under Additional Commands. |

@@ -1,5 +1,5 @@
 // Package daemonize wraps a cobra command with Unix daemon lifecycle controls —
-// start, stop, status, and reload — by re-execing the binary as a detached
+// start, stop, and status — by re-execing the binary as a detached
 // background process. The wrapped command runs in the foreground; the
 // daemon manages backgrounding, a pid file, log streaming during startup and
 // shutdown, and signal-based readiness, all without mutating the command.
@@ -31,7 +31,7 @@ func NewDaemon() v1.Daemon[any] {
 // already know you are wrapping a cobra command and don't need the untyped
 // Daemon[any] bootstrap:
 //
-//	cmd := daemonize.FromCobra(serve).WithReload(syscall.SIGHUP).DetachOn(ready)
+//	cmd := daemonize.FromCobra(serve).WithShutdownSignal(os.Interrupt, syscall.SIGTERM).DetachOn(ready)
 func FromCobra(command *cobra.Command) v1.Daemon[*cobra.Command] {
 	return NewDaemon().FromCobra(command)
 }
