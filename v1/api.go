@@ -3,7 +3,6 @@ package v1
 import (
 	"context"
 	"os"
-	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -20,10 +19,6 @@ type Daemon[T any] interface {
 	// "start" stops streaming and detaches. Pass nil for no readiness relay.
 	// After FromCobra, T is *cobra.Command (the root command to Execute).
 	DetachOn(detachSig <-chan struct{}) T
-	// WithReload enables the "reload" subcommand and sets the signal it sends to
-	// the running process. It must match the signal the wrapped command listens
-	// on. Without it, no reload subcommand is registered.
-	WithReload(sig syscall.Signal) Daemon[T]
 	// WithName overrides the state-file base name. By default it is derived from
 	// the wrapped command's path (e.g. "server-serve"); WithName("foo") yields
 	// ".foo.pid"/".foo.log" instead.
@@ -49,9 +44,9 @@ type Daemon[T any] interface {
 	//   ctx, cancel := signal.NotifyContext(parent, sigs...)
 	//   cmd.SetContext(ctx)
 	// The wrapped command can then use <-cmd.Context().Done() to react
-	// without wiring signal.Notify itself. Stop, Reload, Status, and the
-	// wrapped RunE all call cancel on exit so the underlying goroutine is
-	// released. If WithContext(nil) was called, this is a no-op.
+	// without wiring signal.Notify itself. Stop, Status, and the wrapped
+	// RunE all call cancel on exit so the underlying goroutine is released.
+	// If WithContext(nil) was called, this is a no-op.
 	WithShutdownSignal(sigs ...os.Signal) Daemon[T]
 	// Stop sends SIGTERM to the running process and waits indefinitely for
 	// it to exit. A Ctrl+C (or SIGTERM to this process) during the wait
@@ -64,9 +59,6 @@ type Daemon[T any] interface {
 	// bytes come back — the signature matches json.Marshal and yaml.Marshal
 	// so they drop in directly.
 	Status(marshal func(any) ([]byte, error)) error
-	// Reload sends the configured reload signal (WithReload, default SIGHUP) to
-	// the running process.
-	Reload() error
 	// PID reads the process ID from the pid file.
 	PID() (int, error)
 	// IsAlive reports whether the process named by the pid file is running.

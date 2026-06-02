@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 
 	"github.com/cnuss/daemonize"
@@ -25,10 +24,7 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("config: port=%d verbose=%t args=%v\n", port, verbose, args)
 			close(ready)
-
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-			<-stop
+			<-cmd.Context().Done()
 			fmt.Println("stopping")
 			return nil
 		},
@@ -38,6 +34,7 @@ func main() {
 
 	cmd := daemonize.NewDaemon().
 		FromCobra(serve).
+		WithShutdownSignal(os.Interrupt, syscall.SIGTERM).
 		DetachOn(ready)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

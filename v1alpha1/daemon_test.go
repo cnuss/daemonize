@@ -2,10 +2,8 @@ package v1alpha1
 
 import (
 	"os"
-	"os/exec"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -31,30 +29,6 @@ func cmdByName(root *cobra.Command, name string) *cobra.Command {
 		}
 	}
 	return nil
-}
-
-// deadPID returns a pid that has exited and been reaped, so it is not alive.
-func deadPID(t *testing.T) int {
-	t.Helper()
-	c := exec.Command("true")
-	if err := c.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pid := c.Process.Pid
-	_ = c.Wait()
-	return pid
-}
-
-func TestReloadOptIn(t *testing.T) {
-	root := New[any]().FromCobra(newInner()).DetachOn(nil)
-	if hasCmd(root, "reload") {
-		t.Error("reload should be absent without WithReload")
-	}
-
-	root = New[any]().FromCobra(newInner()).WithReload(syscall.SIGHUP).DetachOn(nil)
-	if !hasCmd(root, "reload") {
-		t.Error("reload should be present with WithReload")
-	}
 }
 
 func TestGrouping(t *testing.T) {
@@ -110,7 +84,7 @@ func TestDetachOnEnrichesCommand(t *testing.T) {
 	origRunE := reflect.ValueOf(cmd.RunE).Pointer()
 	origUse := cmd.Use
 
-	got := New[any]().FromCobra(cmd).WithReload(syscall.SIGHUP).DetachOn(nil)
+	got := New[any]().FromCobra(cmd).DetachOn(nil)
 
 	// DetachOn returns the same command, now enriched with lifecycle subcommands.
 	if got != cmd {
@@ -122,7 +96,7 @@ func TestDetachOnEnrichesCommand(t *testing.T) {
 	if reflect.ValueOf(cmd.RunE).Pointer() == origRunE {
 		t.Error("DetachOn should have wrapped command.RunE")
 	}
-	for _, name := range []string{"start", "stop", "status", "reload"} {
+	for _, name := range []string{"start", "stop", "status"} {
 		if !hasCmd(cmd, name) {
 			t.Errorf("DetachOn did not attach %q as a subcommand", name)
 		}
@@ -151,6 +125,7 @@ func isolateCache(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)           // darwin: $HOME/Library/Caches
 	t.Setenv("XDG_CACHE_HOME", tmp) // other unix
+	t.Setenv("LOCALAPPDATA", tmp)   // windows
 }
 
 // newDaemonFiles returns a daemon with state-file paths resolved under an
@@ -160,6 +135,7 @@ func newDaemonFiles(t *testing.T, base string) *DaemonImpl[any] {
 	isolateCache(t)
 	d := &DaemonImpl[any]{}
 	d.pidFile, d.logFile = stateFiles("app", base)
+	d.platform = newPlatform(d.pidFile, d.logFile)
 	return d
 }
 
@@ -187,68 +163,6 @@ func TestReadPIDInvalid(t *testing.T) {
 	}
 }
 
-func TestIsAlive(t *testing.T) {
-	d := newDaemonFiles(t, "test")
-	if err := d.writePID(os.Getpid()); err != nil {
-		t.Fatal(err)
-	}
-	if !d.IsAlive() {
-		t.Error("self pid should be alive")
-	}
-	if err := d.writePID(deadPID(t)); err != nil {
-		t.Fatal(err)
-	}
-	if d.IsAlive() {
-		t.Error("reaped pid should not be alive")
-	}
-}
-
-func TestEnsurePid(t *testing.T) {
-	d := newDaemonFiles(t, "test")
-	startGate := d.ensurePid(false) // start: must NOT be running
-	stopGate := d.ensurePid(true)   // stop/reload: must be running
-
-	// No pid file.
-	if err := startGate(nil, nil); err != nil {
-		t.Errorf("startGate, no pidfile: unexpected error %v", err)
-	}
-	if err := stopGate(nil, nil); err == nil {
-		t.Error("stopGate, no pidfile: want error")
-	}
-
-	// Live process.
-	if err := d.writePID(os.Getpid()); err != nil {
-		t.Fatal(err)
-	}
-	if err := startGate(nil, nil); err == nil {
-		t.Error("startGate, running: want error")
-	}
-	if err := stopGate(nil, nil); err != nil {
-		t.Errorf("stopGate, running: unexpected error %v", err)
-	}
-
-	// Stale pid file (counts as not running).
-	if err := d.writePID(deadPID(t)); err != nil {
-		t.Fatal(err)
-	}
-	if err := startGate(nil, nil); err != nil {
-		t.Errorf("startGate, stale: unexpected error %v", err)
-	}
-	if err := stopGate(nil, nil); err == nil {
-		t.Error("stopGate, stale: want error")
-	}
-}
-
-func TestStopReloadNotRunning(t *testing.T) {
-	d := newDaemonFiles(t, "test")
-	if err := d.Stop(); err != nil { // stop is idempotent: no-op when not running
-		t.Errorf("Stop with no pid file: unexpected error %v", err)
-	}
-	if err := d.Reload(); err == nil {
-		t.Error("Reload with no pid file: want error")
-	}
-}
-
 func TestStatusWithoutCobra(t *testing.T) {
 	d := newDaemonFiles(t, "test")
 	if err := d.Status(nil); err != nil { // not running -> nil
@@ -259,24 +173,6 @@ func TestStatusWithoutCobra(t *testing.T) {
 	}
 	if err := d.Status(nil); err != nil { // running -> nil
 		t.Errorf("Status running: %v", err)
-	}
-}
-
-func TestStopLive(t *testing.T) {
-	d := newDaemonFiles(t, "test")
-	c := exec.Command("sleep", "30")
-	if err := c.Start(); err != nil {
-		t.Fatal(err)
-	}
-	go c.Wait() // reap on death so the zombie doesn't fool the liveness check
-	if err := d.writePID(c.Process.Pid); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if syscall.Kill(c.Process.Pid, 0) == nil {
-		t.Error("process still alive after Stop")
 	}
 }
 

@@ -7,7 +7,7 @@ lives in the linked sources.
 
 `github.com/cnuss/daemonize` — wraps any
 [`cobra`](https://github.com/spf13/cobra) command with Unix daemon
-lifecycle controls (start / stop / status / reload). Library spec and
+lifecycle controls (start / stop / status). Library spec and
 public API live in the [README](./README.md). Reading order for a
 fresh session:
 
@@ -43,7 +43,8 @@ Deep-link by filename; line numbers will drift.
 | Cobra wiring (`buildCobra`, `ensurePid`, `--output`) | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
 | `start` subcommand (fork + exec, `startCobra`)       | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
 | `streamUntilReady` + `startResult` enum              | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
-| `Stop` / `Status` / `Reload`, `computeStatus`        | [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go)                 |
+| `Stop` (orchestrator)                                | [`v1alpha1/cobra.go`](./v1alpha1/cobra.go)                         |
+| `Status` + `computeStatus`                           | [`v1alpha1/lifecycle.go`](./v1alpha1/lifecycle.go)                 |
 | `IsAlive` / `PIDFile` / `LogFile` / `Name` / `PID`   | [`v1alpha1/accessors.go`](./v1alpha1/accessors.go)                 |
 | State files, env-var derivation, log tail            | [`v1alpha1/util.go`](./v1alpha1/util.go)                           |
 | Package constants                                    | [`v1alpha1/consts.go`](./v1alpha1/consts.go)                       |
@@ -58,6 +59,88 @@ Deep-link by filename; line numbers will drift.
 | e2e harness + runner                                 | [`e2e/e2e_test.go`](./e2e/e2e_test.go)                             |
 | godoc examples                                       | [`v1/example_test.go`](./v1/example_test.go)                       |
 | In-package unit tests + fuzz target                  | [`v1alpha1/daemon_test.go`](./v1alpha1/daemon_test.go)             |
+
+## Platform layer
+
+`v1alpha1` ships a small `platform` interface (defined in
+[`v1alpha1/cobra.go`](./v1alpha1/cobra.go)) with two impls — same
+struct name `platformImpl` in both, distinguished by build tags:
+
+- [`v1alpha1/platform.go`](./v1alpha1/platform.go) — `//go:build !windows`
+- [`v1alpha1/platform_windows.go`](./v1alpha1/platform_windows.go) — `//go:build windows`
+
+Every step that touches the OS — `applyDetachAttrs`, `installStartSignals`,
+`waitForEarlyExit`, `killChildOnInterrupt`, `afterStartupReady`,
+`pollStartupState`, `isAlive`, `notifyParentReady`, `installShutdownListener`,
+and `stop` — is one method on this interface. `startCobra` and `Stop` in
+`cobra.go` orchestrate them; they don't touch syscalls directly.
+
+### Detach + readiness — side-by-side
+
+| Step                  | Unix                                                                 | Windows                                                                                                              |
+| --------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Spawn detach mode     | `SysProcAttr{Setsid: true}` — new session, survives parent exit      | `SysProcAttr{CreationFlags: DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP, HideWindow: true}` — no console, own group |
+| Parent waits for ready | `signal.Notify(SIGUSR1/SIGCHLD/SIGINT/SIGTERM)` + `Wait4`            | Polls `<base>.ready` sentinel + `IsAlive(child)` every 100 ms, plus `signal.Notify(os.Interrupt)` for Ctrl+C cancel  |
+| Child signals ready   | `syscall.Kill(os.Getppid(), syscall.SIGUSR1)`                        | `os.Create("<base>.ready")` next to the pid file                                                                     |
+| Liveness probe        | `syscall.Kill(pid, 0)` (returns nil → alive)                         | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`; `STILL_ACTIVE (259)` means running          |
+
+### Graceful shutdown — Windows uses a named pipe
+
+Named-pipe path: `\\.\pipe\daemonize-<base>`. `<base>` matches the
+state-file basename (`<base>.pid`, `<base>.log`, `<base>.ready`).
+
+Flow:
+
+1. **Child side, in the wrapped `RunE` relay** (Windows only): after
+   `close(detachSig)` fires, the relay calls
+   `d.platform.installShutdownListener(d.ctxCancel)` BEFORE
+   `notifyParentReady`. `installShutdownListener` synchronously
+   `CreateNamedPipe`s the pipe (so it's instantly connectable), then
+   spawns a goroutine that `ConnectNamedPipe`s, reads one byte, and
+   calls the cancel func. `d.ctxCancel` is whatever
+   `signal.NotifyContext` returned from `WithShutdownSignal` — calling
+   it cancels `cmd.Context()`, which surfaces as
+   `<-cmd.Context().Done()` to the worker.
+2. **Parent side, `platformImpl.stop`**: opens the same pipe as a
+   client with `CreateFile` + `GENERIC_WRITE`, writes one byte. On
+   success, polls `isAlive` indefinitely while the worker tears down,
+   with `os.Interrupt` in the stop console escalating to
+   `TerminateProcess` — same shape as the Unix SIGTERM+poll+escalate
+   loop in `platform.go`'s `stop`.
+3. **Pipe-write failure** (child crashed before listening, never
+   configured `WithShutdownSignal`, pipe vanished): `stop` falls
+   straight through to `TerminateProcess`. The child gets no defer
+   execution along that path, same as a Unix SIGKILL.
+
+Examples that demo lifecycle (`hello`, `slow-start`, `slow-shutdown`,
+`shutdown-error`, `named`, `grouped`, `ungrouped`) all use
+`WithShutdownSignal(os.Interrupt, syscall.SIGTERM)` +
+`<-cmd.Context().Done()`. The raw `signal.Notify(stop, SIGTERM)`
+pattern still works on Unix but bypasses the named-pipe trigger on
+Windows — workers that want cross-platform graceful shutdown must
+take the cancel-context route.
+
+### Cross-platform Ctrl+C
+
+The e2e harness's `runInterrupt` helper is now cross-platform:
+`configureInterruptable` + `sendInterrupt` (in
+[`e2e/interrupt_unix.go`](./e2e/interrupt_unix.go) and
+[`e2e/interrupt_windows.go`](./e2e/interrupt_windows.go)) pick the
+right primitive — `Process.Signal(syscall.SIGINT)` on Unix,
+`GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)` on Windows. The Windows
+side spawns the target with `CREATE_NEW_PROCESS_GROUP` so the test
+can address it by pid without taking down everything else attached
+to the same console. `TestStartInterruptGraceful` and
+`TestStopInterruptEscalates` exercise the same flow on both targets
+via this helper.
+
+The full e2e suite runs on both targets now: every test in
+[`e2e/e2e_test.go`](./e2e/e2e_test.go) is cross-platform. The
+`e2e_unix_test.go` file is gone. The two build-tagged shims
+([`e2e/interrupt_unix.go`](./e2e/interrupt_unix.go),
+[`e2e/interrupt_windows.go`](./e2e/interrupt_windows.go)) host the
+small per-OS helpers — `configureInterruptable`, `sendInterrupt`,
+`killPID`, `waitForExit` — that the cross-platform tests call into.
 
 ## Conventions agents miss
 
@@ -88,10 +171,10 @@ memory.
   lives in `buildCobra`
   ([`v1alpha1/cobra.go`](./v1alpha1/cobra.go)).
 - **godoc example funcs can't bind to generic types.** `go vet`
-  rejects `ExampleDaemon_WithReload` in `v1` because `Daemon` is
-  parameterized — its example checker hasn't caught up with
-  generics. We work around it by using package-level example names
-  (`Example_withReload`) instead. See
+  rejects `ExampleDaemon_WithName` (or any `ExampleDaemon_*`) in `v1`
+  because `Daemon` is parameterized — its example checker hasn't
+  caught up with generics. We work around it by using package-level
+  example names (`Example_withName` etc.). See
   [`v1/example_test.go`](./v1/example_test.go).
 - **Skip-release token must be line-anchored.** The regex is in
   [`ci.yml`](./.github/workflows/ci.yml) (`resolve tag` step):

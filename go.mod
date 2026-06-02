@@ -2,7 +2,10 @@ module github.com/cnuss/daemonize
 
 go 1.21
 
-require github.com/spf13/cobra v1.6.0
+require (
+	github.com/spf13/cobra v1.6.0
+	golang.org/x/sys v0.27.0
+)
 
 require (
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect

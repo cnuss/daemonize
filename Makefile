@@ -1,8 +1,37 @@
-.PHONY: test e2e run
+.PHONY: all check fmt fmt-check vet build windows test e2e run
 
-# Library package tests only (excludes examples).
+# Default: everything CI runs except the auto-bump release step.
+all: fmt-check vet build windows test e2e
+
+# Compose the common pre-push checklist. Mirrors the CI matrix.
+check: fmt-check vet windows test e2e
+
+# gofmt the tree in place.
+fmt:
+	gofmt -w .
+
+# Fail if anything in the tree is not gofmt-clean.
+fmt-check:
+	@out=$$(gofmt -l .); \
+	if [ -n "$$out" ]; then echo "gofmt found unformatted files:"; echo "$$out"; exit 1; fi
+
+# Static analysis across every package.
+vet:
+	go vet ./...
+
+# Build the whole module for the host platform.
+build:
+	go build ./...
+
+# Cross-compile + vet for Windows. The build-only smoke prevents the
+# !windows / windows split from drifting between local edits and CI.
+windows:
+	GOOS=windows go vet ./...
+	GOOS=windows go build ./...
+
+# Library unit + fuzz tests in v1alpha1 (and a stub run for v1 + facade).
 test:
-	go test .
+	go test ./...
 
 # End-to-end: the harness builds and drives every example binary. -count=1 disables
 # go test caching, since the harness builds the example binaries at runtime and the

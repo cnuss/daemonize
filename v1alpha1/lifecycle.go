@@ -3,66 +3,10 @@ package v1alpha1
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/cnuss/daemonize/v1"
 )
-
-func (d *DaemonImpl[T]) Stop() error {
-	if d.ctxCancel != nil {
-		defer d.ctxCancel()
-	}
-	pid, err := d.PID()
-	if err != nil {
-		fmt.Println("not running")
-		return nil
-	}
-	if !d.IsAlive() {
-		os.Remove(d.pidFile)
-		fmt.Printf("not running (cleared stale pid %d)\n", pid)
-		return nil
-	}
-	fmt.Printf("shutting down (pid %d)...\n", pid)
-
-	// Reattach to the log and stream only output produced from here on, so the
-	// user sees the child's shutdown steps while we wait.
-	tail := d.openLog(true)
-	defer tail.Close()
-
-	// Ctrl+C during the wait force-kills immediately.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return err
-	}
-
-	// Wait indefinitely for the child to exit on SIGTERM. The caller is
-	// already in control: a second Ctrl+C (or SIGTERM to this process)
-	// escalates to SIGKILL immediately.
-	for {
-		tail.copy()
-		if !d.IsAlive() {
-			tail.copy() // drain any final shutdown output
-			os.Remove(d.pidFile)
-			fmt.Printf("stopped (pid %d)\n", pid)
-			return nil
-		}
-		select {
-		case <-sigCh:
-			tail.copy()
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			os.Remove(d.pidFile)
-			fmt.Printf("\nkilled (pid %d) on interrupt\n", pid)
-			return nil
-		case <-time.After(stopPollEach):
-		}
-	}
-}
 
 // computeStatus reads the pid file and resolves the daemon's current state.
 // A stale pid file is removed here as a side effect — Status relies on that
@@ -126,28 +70,5 @@ func (d *DaemonImpl[T]) Status(marshal func(any) ([]byte, error)) error {
 		return err
 	}
 	fmt.Println(string(b))
-	return nil
-}
-
-func (d *DaemonImpl[T]) Reload() error {
-	if d.ctxCancel != nil {
-		defer d.ctxCancel()
-	}
-	sig := syscall.Signal(syscall.SIGHUP)
-	if d.reloadSig != nil {
-		sig = *d.reloadSig
-	}
-	pid, err := d.PID()
-	if err != nil {
-		return fmt.Errorf("not running (no pid file)")
-	}
-	if !d.IsAlive() {
-		os.Remove(d.pidFile)
-		return fmt.Errorf("not running (stale pid %d)", pid)
-	}
-	if err := syscall.Kill(pid, sig); err != nil {
-		return err
-	}
-	fmt.Printf("reload signal sent (pid %d)\n", pid)
 	return nil
 }

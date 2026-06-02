@@ -3,7 +3,6 @@ package v1alpha1
 import (
 	"context"
 	"os"
-	"syscall"
 
 	"github.com/cnuss/daemonize/v1"
 	"github.com/spf13/cobra"
@@ -11,7 +10,7 @@ import (
 
 // FromCobra wraps command, retyping the builder to *cobra.Command so Into
 // returns the assembled root command. Configure with the With* methods after
-// this call; reload is disabled until WithReload sets a signal.
+// this call.
 func (d *DaemonImpl[T]) FromCobra(command *cobra.Command) v1.Daemon[*cobra.Command] {
 	return &DaemonImpl[*cobra.Command]{inner: command}
 }
@@ -27,11 +26,6 @@ func (d *DaemonImpl[T]) DetachOn(detachSig <-chan struct{}) T {
 	default:
 		panic("daemonize: unsupported wrapped type")
 	}
-}
-
-func (d *DaemonImpl[T]) WithReload(sig syscall.Signal) v1.Daemon[T] {
-	d.reloadSig = &sig
-	return d
 }
 
 func (d *DaemonImpl[T]) WithName(name string) v1.Daemon[T] {
