@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -58,6 +59,21 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(parent, d.shutdownSigs...)
 			d.ctxCancel = cancel
 			command.SetContext(ctx)
+			// Second receiver so we know WHICH signal arrived: NotifyContext
+			// cancels the ctx but doesn't expose the triggering signal.
+			// A foreground run uses this to re-raise via os.Exit(128+signum)
+			// at the end of RunE so the shell sees the conventional code
+			// instead of a clean 0.
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, d.shutdownSigs...)
+			go func() {
+				sig := <-sigCh
+				d.caughtSigMu.Lock()
+				if d.caughtSig == nil {
+					d.caughtSig = sig
+				}
+				d.caughtSigMu.Unlock()
+			}()
 		} else {
 			command.SetContext(parent)
 		}
@@ -102,6 +118,13 @@ func (d *DaemonImpl[T]) buildCobra() *cobra.Command {
 	origRun := command.Run
 	command.Run = nil
 	command.RunE = func(cmd *cobra.Command, args []string) error {
+		// Defer order is LIFO: reraiseCaughtSignal is registered first so it
+		// runs LAST — after ctxCancel and the pid-file removal. If a
+		// shutdown signal was observed during a foreground run, this os.Exits
+		// with 128+signum so the shell sees the conventional signal-exit
+		// code instead of cobra's clean nil return. Daemon children skip
+		// the re-raise inside the helper itself.
+		defer d.reraiseCaughtSignal()
 		defer d.ctxCancel()
 		if err := d.writePID(os.Getpid()); err != nil {
 			return err
@@ -436,4 +459,34 @@ func (d *DaemonImpl[T]) Stop() error {
 	os.Remove(d.pidFile)
 	fmt.Printf("stopped (pid %d)\n", pid)
 	return nil
+}
+
+// reraiseCaughtSignal exits the process with the conventional 128+signum
+// code when a foreground run is unblocked by a WithShutdownSignal-registered
+// signal. No-op in three cases:
+//
+//   - inside a daemon child (daemonEnvFor is set): the parent's Stop is the
+//     authoritative exit reporter for that lifetime; the child should
+//     unwind normally so cobra prints the wrapped command's error, if any,
+//     to the log file.
+//   - no signal observed: the caller returned for its own reasons (timer,
+//     channel close, explicit cancel); leave the exit code alone.
+//   - the captured os.Signal can't be cast to syscall.Signal: don't guess.
+//
+// Called as the LAST defer in the wrapped RunE so ctxCancel and the pid
+// file removal still run before the os.Exit. os.Exit skips remaining
+// defers; the explicit ordering keeps the pid file from leaking.
+func (d *DaemonImpl[T]) reraiseCaughtSignal() {
+	if os.Getenv(daemonEnvFor(d.base)) != "" {
+		return
+	}
+	d.caughtSigMu.Lock()
+	sig := d.caughtSig
+	d.caughtSigMu.Unlock()
+	if sig == nil {
+		return
+	}
+	if s, ok := sig.(syscall.Signal); ok {
+		os.Exit(128 + int(s))
+	}
 }

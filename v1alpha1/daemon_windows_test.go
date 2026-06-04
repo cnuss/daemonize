@@ -4,8 +4,33 @@ package v1alpha1
 
 import (
 	"os"
+	"os/exec"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
+
+// stalePID returns a pid whose process has exited, so isAlive reports false.
+// Spawning cmd.exe with `exit 0` and waiting for it gives us a pid the
+// liveness probe will refuse: GetExitCodeProcess returns 0 (not
+// STILL_ACTIVE) and platformImpl.isAlive returns false.
+func stalePID(t *testing.T) int {
+	t.Helper()
+	c := exec.Command("cmd.exe", "/c", "exit", "0")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := c.Process.Pid
+	_ = c.Wait()
+	// Hold the handle open briefly so the kernel does not recycle the pid
+	// before the test calls isAlive on it. WaitForSingleObject(0) just
+	// confirms the wait state; we drop the handle right after.
+	if h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid)); err == nil {
+		_, _ = windows.WaitForSingleObject(h, 0)
+		_ = windows.CloseHandle(h)
+	}
+	return pid
+}
 
 // Phase 2 contract on Windows: Stop and startCobra work; IsAlive uses
 // OpenProcess + GetExitCodeProcess; notifyParentReady leaves a sentinel

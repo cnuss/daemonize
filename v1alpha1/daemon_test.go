@@ -222,3 +222,77 @@ func equalStrs(a, b []string) bool {
 	}
 	return true
 }
+
+// Error-message contracts used by the lifecycle exit-code suite (#16). The
+// e2e suite asserts the *exit code*; these tests pin the surface text so a
+// refactor of cobra.go can't silently change the message users grep for.
+
+func TestEnsurePidErrorIncludesPid(t *testing.T) {
+	d := newDaemonFiles(t, "test")
+	if err := d.writePID(os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	err := d.ensurePid(false)(nil, nil) // start gate against a live pid
+	if err == nil {
+		t.Fatal("ensurePid(false) on live pid: want error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "already running") {
+		t.Errorf("error message %q missing 'already running'", msg)
+	}
+	if !strings.Contains(msg, "(pid ") {
+		t.Errorf("error message %q missing pid", msg)
+	}
+}
+
+func TestEnsurePidNotRunningMessage(t *testing.T) {
+	d := newDaemonFiles(t, "test")
+	err := d.ensurePid(true)(nil, nil) // stop gate, no pid file
+	if err == nil {
+		t.Fatal("ensurePid(true) without pid file: want error")
+	}
+	if got, want := err.Error(), "not running"; got != want {
+		t.Errorf("error message = %q, want %q", got, want)
+	}
+}
+
+func TestStatusOutputFormatSet(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantErr bool
+	}{
+		{"text", false},
+		{"json", false},
+		{"", true},
+		{"yaml", true},
+		{"TEXT", true}, // case-sensitive on purpose; users typo lowercase
+		{"text,json", true},
+	}
+	for _, tc := range cases {
+		var f statusOutputFormat
+		err := f.Set(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("Set(%q) error = %v, wantErr = %v", tc.in, err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "must be one of: text, json") {
+			t.Errorf("Set(%q) error = %q, want it to mention the valid set", tc.in, err)
+		}
+	}
+}
+
+func TestStopStaleRemovesPidFile(t *testing.T) {
+	d := newDaemonFiles(t, "test")
+	// Plant a pid file pointing at a pid that does not exist on either OS.
+	// PID 1 belongs to init/launchd, but writing it and then stopping would
+	// actually try to signal it; use a sentinel that is guaranteed to fail
+	// the liveness probe instead.
+	if err := d.writePID(stalePID(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Stop(); err != nil {
+		t.Fatalf("Stop with stale pid: unexpected error %v", err)
+	}
+	if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+		t.Errorf("pid file should be removed after stale Stop; stat err = %v", err)
+	}
+}

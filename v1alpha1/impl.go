@@ -52,4 +52,11 @@ type DaemonImpl[T any] struct {
 	// constructed once during buildCobra, after the state-file paths
 	// (pidFile, logFile, base) have been resolved.
 	platform platform
+
+	// caughtSig records the first shutdown signal observed in the parent
+	// process, so a foreground run can re-raise it via os.Exit(128+signum)
+	// after the wrapped RunE returns. Daemon children skip the re-raise
+	// (the parent's Stop is what surfaces their exit code).
+	caughtSigMu sync.Mutex
+	caughtSig   os.Signal
 }

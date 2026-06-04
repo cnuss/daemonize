@@ -176,6 +176,63 @@ lifecycle subcommands and wraps `RunE` to own the pid file. Then:
 Side-by-side flow + the wire format for the named-pipe shutdown live
 in [CLAUDE.md → Platform layer](./CLAUDE.md#platform-layer).
 
+## Exit codes
+
+Lifecycle subcommands and the foreground run obey a fixed contract,
+verified by the `TestExit*` suite under [`./e2e`](./e2e). Pinned for
+both Unix and Windows.
+
+### Exit `0` — clean
+
+| Path                                                                   |
+| ---------------------------------------------------------------------- |
+| `start` succeeded (child is detached and ready)                        |
+| `stop` graceful — worker exited via `cmd.Context().Done()` teardown    |
+| `stop` when nothing was running (no pid file)                          |
+| `stop` with a stale pid file — daemon cleared it                        |
+| `stop` where the worker errored mid-shutdown but still exited          |
+| `stop` where Ctrl+C escalated to a forced kill — parent reaped cleanly |
+| `status` running / not running / stale                                 |
+| Foreground worker returned without a shutdown signal arriving          |
+
+### Exit `1` — caller- or state-level failure
+
+| Path                                                                |
+| ------------------------------------------------------------------- |
+| `start` while a daemon is already running                           |
+| `start` where the wrapped command exited during startup             |
+| `start` cancelled by Ctrl+C (`startup cancelled`)                   |
+| `status --output=<not text\|json>` (pflag rejection)                |
+| Any subcommand invoked with an unknown flag (cobra rejection)       |
+
+Note: unknown POSITIONAL args are NOT a flag error — `buildCobra`
+defaults `command.Args` to `cobra.ArbitraryArgs` so positionals
+forward to the wrapped worker (see `examples/with-args`). Set a
+stricter `Args` validator on the wrapped command if you want
+positionals rejected.
+
+### Exit `128 + signum` — foreground interrupted by signal
+
+When the wrapped command is run directly (no `start`), a shutdown
+signal observed by `WithShutdownSignal`'s `signal.NotifyContext`
+re-exits the process with the conventional `128 + signum` code after
+the worker drains. Bash, init systems, and process supervisors expect
+this — a clean `0` would hide the fact that the run was interrupted.
+
+| Signal       | Exit code |
+| ------------ | --------- |
+| `SIGINT` (2) | `130`     |
+| `SIGTERM` (15) | `143`   |
+| Other registered signals | `128 + signum` |
+
+Only fires for foreground runs of the wrapped command — daemon children
+spawned by `start` skip the re-raise so the parent's `stop` remains the
+authoritative exit reporter for that lifetime.
+
+On Windows, the Go runtime maps both `CTRL_C_EVENT` and
+`CTRL_BREAK_EVENT` to `syscall.SIGINT` before delivery, so Ctrl+C of a
+foreground worker exits `130` on that target too.
+
 ## Features
 
 - **In-place enrichment**: `FromCobra(cmd).DetachOn(ready)` returns the same

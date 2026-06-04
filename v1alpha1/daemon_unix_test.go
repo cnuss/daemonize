@@ -21,6 +21,11 @@ func deadPID(t *testing.T) int {
 	return pid
 }
 
+// stalePID is the cross-platform name used by daemon_test.go. On Unix it
+// delegates to deadPID; the Windows side has its own implementation in
+// daemon_windows_test.go.
+func stalePID(t *testing.T) int { return deadPID(t) }
+
 func TestIsAlive(t *testing.T) {
 	d := newDaemonFiles(t, "test")
 	if err := d.writePID(os.Getpid()); err != nil {
