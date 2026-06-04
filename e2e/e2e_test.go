@@ -31,21 +31,31 @@ func newRunner(t *testing.T, name string) *runner {
 		t.Fatalf("build %s: %v\n%s", name, err, out)
 	}
 	r := &runner{name: name, bin: bin, home: t.TempDir()}
-	t.Cleanup(func() { _ = r.execRaw("stop") }) // best-effort: never leave a daemon running
+	t.Cleanup(func() { _, _ = r.execRaw("stop") }) // best-effort: never leave a daemon running
 	return r
 }
 
 // run executes the example with args, logs the command + output (visible under
 // `go test -v`), and returns combined output. Exit status is ignored; tests
-// assert on output (some commands exit non-zero by design).
+// that need the exit code use runC instead.
 func (r *runner) run(t *testing.T, args ...string) string {
 	t.Helper()
-	out := r.execRaw(args...)
-	t.Logf("$ %s %s\n%s", r.name, strings.Join(args, " "), out)
+	out, _ := r.runC(t, args...)
 	return out
 }
 
-func (r *runner) execRaw(args ...string) string {
+// runC is the exit-code-aware variant: returns (output, exitCode). Code is
+// the process's exit status as reported by exec.Cmd.ProcessState; -1 if the
+// command could not be started. A signal-terminated child reports -1 too —
+// callers that care about signals should use runInterrupt.
+func (r *runner) runC(t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	out, code := r.execRaw(args...)
+	t.Logf("$ %s %s (exit %d)\n%s", r.name, strings.Join(args, " "), code, out)
+	return out, code
+}
+
+func (r *runner) execRaw(args ...string) (string, int) {
 	c := exec.Command(r.bin, args...)
 	// HOME drives os.UserCacheDir on darwin; XDG_CACHE_HOME on linux/*bsd;
 	// LOCALAPPDATA on windows. Setting all three keeps every test isolated
@@ -55,8 +65,16 @@ func (r *runner) execRaw(args ...string) string {
 		"XDG_CACHE_HOME="+r.home,
 		"LOCALAPPDATA="+r.home,
 	)
-	out, _ := c.CombinedOutput()
-	return string(out)
+	out, err := c.CombinedOutput()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			code = -1
+		}
+	}
+	return string(out), code
 }
 
 // runInterrupt starts the example asynchronously, sends a Ctrl+C signal at
@@ -66,6 +84,13 @@ func (r *runner) execRaw(args ...string) string {
 // that pick the right OS primitive — POSIX SIGINT on Unix,
 // GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT) on Windows.
 func (r *runner) runInterrupt(t *testing.T, args []string, sendAt ...time.Duration) string {
+	t.Helper()
+	out, _ := r.runInterruptC(t, args, sendAt...)
+	return out
+}
+
+// runInterruptC is the exit-code-aware variant of runInterrupt.
+func (r *runner) runInterruptC(t *testing.T, args []string, sendAt ...time.Duration) (string, int) {
 	t.Helper()
 	c := exec.Command(r.bin, args...)
 	configureInterruptable(c)
@@ -87,10 +112,18 @@ func (r *runner) runInterrupt(t *testing.T, args []string, sendAt ...time.Durati
 		}
 		_ = sendInterrupt(c.Process)
 	}
-	_ = c.Wait()
+	err := c.Wait()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			code = -1
+		}
+	}
 	out := buf.String()
-	t.Logf("$ %s %s (interrupts: %v)\n%s", r.name, strings.Join(args, " "), sendAt, out)
-	return out
+	t.Logf("$ %s %s (interrupts: %v, exit %d)\n%s", r.name, strings.Join(args, " "), sendAt, code, out)
+	return out, code
 }
 
 func wants(t *testing.T, out string, subs ...string) {
@@ -377,4 +410,156 @@ func between(s, prefix, suffix string) string {
 		return ""
 	}
 	return mid
+}
+
+// wantExit fails the test (without aborting) if got != want, with the output
+// for context.
+func wantExit(t *testing.T, want, got int, out string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("exit code = %d, want %d. output:\n%s", got, want, out)
+	}
+}
+
+// Exit-code contract across the lifecycle. One scenario per test so a
+// regression points at exactly the failed transition. See #16.
+
+func TestExitStartSuccess(t *testing.T) {
+	r := newRunner(t, "hello")
+	_, code := r.runC(t, "start")
+	wantExit(t, 0, code, "")
+}
+
+func TestExitStartAlreadyRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	r.run(t, "start")
+	out, code := r.runC(t, "start")
+	wantExit(t, 1, code, out)
+	wants(t, out, "already running")
+}
+
+func TestExitStartWorkerExited(t *testing.T) {
+	r := newRunner(t, "start-error")
+	out, code := r.runC(t, "start")
+	wantExit(t, 1, code, out)
+	wants(t, out, "exited during startup")
+}
+
+func TestExitStartInterrupted(t *testing.T) {
+	r := newRunner(t, "slow-start")
+	out, code := r.runInterruptC(t,
+		[]string{"start", "--step", "200ms"}, 300*time.Millisecond)
+	wantExit(t, 1, code, out)
+	wants(t, out, "startup cancelled")
+}
+
+func TestExitStopGraceful(t *testing.T) {
+	r := newRunner(t, "hello")
+	r.run(t, "start")
+	out, code := r.runC(t, "stop")
+	wantExit(t, 0, code, out)
+	wants(t, out, "stopped")
+}
+
+func TestExitStopNotRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	out, code := r.runC(t, "stop")
+	wantExit(t, 0, code, out)
+	wants(t, out, "not running")
+}
+
+func TestExitStopStalePid(t *testing.T) {
+	r := newRunner(t, "hello")
+	r.run(t, "start")
+	pid := pidFromStatus(t, r)
+	if err := killPID(pid); err != nil {
+		t.Fatalf("killPID(%d): %v", pid, err)
+	}
+	waitForExit(pid)
+	out, code := r.runC(t, "stop")
+	wantExit(t, 0, code, out)
+	wants(t, out, "cleared stale pid")
+}
+
+func TestExitStopWorkerShutdownErrored(t *testing.T) {
+	r := newRunner(t, "shutdown-error")
+	r.run(t, "start")
+	out, code := r.runC(t, "stop")
+	// Worker errored during teardown, but stop still completes — pid file is
+	// gone, exit 0. The worker's error line is streamed for visibility.
+	wantExit(t, 0, code, out)
+	wants(t, out, "shutdown error", "stopped")
+}
+
+func TestExitStopInterruptEscalated(t *testing.T) {
+	r := newRunner(t, "stubborn")
+	r.run(t, "start")
+	out, code := r.runInterruptC(t,
+		[]string{"stop"}, 300*time.Millisecond)
+	// Forced kill via Ctrl+C escalation still exits 0 from the parent —
+	// the daemon successfully terminated its child.
+	wantExit(t, 0, code, out)
+	wants(t, out, "killed", "on interrupt")
+}
+
+func TestExitStatusRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	r.run(t, "start")
+	_, code := r.runC(t, "status")
+	wantExit(t, 0, code, "")
+}
+
+func TestExitStatusNotRunning(t *testing.T) {
+	r := newRunner(t, "hello")
+	_, code := r.runC(t, "status")
+	wantExit(t, 0, code, "")
+}
+
+func TestExitStatusStalePid(t *testing.T) {
+	r := newRunner(t, "hello")
+	r.run(t, "start")
+	pid := pidFromStatus(t, r)
+	if err := killPID(pid); err != nil {
+		t.Fatalf("killPID(%d): %v", pid, err)
+	}
+	waitForExit(pid)
+	out, code := r.runC(t, "status")
+	wantExit(t, 0, code, out)
+	wants(t, out, "stale")
+}
+
+func TestExitStatusInvalidFormat(t *testing.T) {
+	r := newRunner(t, "hello")
+	out, code := r.runC(t, "status", "--output=yaml")
+	wantExit(t, 1, code, out)
+}
+
+func TestExitInvalidFlag(t *testing.T) {
+	r := newRunner(t, "hello")
+	// cobra rejects unknown flags before any RunE; exits 1.
+	// Note: unknown POSITIONAL args are not rejected — buildCobra defaults
+	// command.Args to cobra.ArbitraryArgs so they forward to the worker
+	// (see TestWithArgs).
+	out, code := r.runC(t, "--no-such-flag")
+	wantExit(t, 1, code, out)
+}
+
+// pidFromStatus reads the daemon pid by parsing JSON status output. Used by
+// the stale-pid tests so they don't have to know where the pid file lives.
+func pidFromStatus(t *testing.T, r *runner) int {
+	t.Helper()
+	out, code := r.runC(t, "status", "-o", "json")
+	if code != 0 {
+		t.Fatalf("status -o json: exit %d, output: %s", code, out)
+	}
+	var s struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &s); err != nil {
+		t.Fatalf("parse status JSON: %v\n%s", err, out)
+	}
+	if s.PID == 0 {
+		t.Fatalf("status JSON had no pid: %s", out)
+	}
+	return s.PID
 }
