@@ -544,6 +544,23 @@ func TestExitInvalidFlag(t *testing.T) {
 	wantExit(t, 1, code, out)
 }
 
+// TestExitForegroundInterrupted: running the wrapped command directly (no
+// "start" subcommand) is a foreground run. WithShutdownSignal catches the
+// Ctrl+C, ctx.Done fires, the worker returns nil, and the library re-exits
+// the process with 128+SIGINT = 130 so the shell sees the conventional
+// signal-exit code instead of 0.
+//
+// On Windows, runInterrupt's GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)
+// surfaces as syscall.SIGINT (value 2) on the receiving side, so the
+// expected code is 130 there too.
+func TestExitForegroundInterrupted(t *testing.T) {
+	r := newRunner(t, "hello")
+	out, code := r.runInterruptC(t,
+		[]string{"--message", "world"}, 300*time.Millisecond)
+	wantExit(t, 130, code, out)
+	wants(t, out, "hello world", "stopping")
+}
+
 // pidFromStatus reads the daemon pid by parsing JSON status output. Used by
 // the stale-pid tests so they don't have to know where the pid file lives.
 func pidFromStatus(t *testing.T, r *runner) int {
